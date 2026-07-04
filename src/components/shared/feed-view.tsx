@@ -52,7 +52,11 @@ export function FeedView({
   const sentinelRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const node = sentinelRef.current;
-    if (!node || !hasNextPage || isFetchingNextPage) return;
+    // Bail while an error is present: a failed continuation keeps the
+    // sentinel visible, and re-creating the observer re-fires fetchNextPage
+    // immediately — an unbounded retry loop hammering the API. Stop until
+    // the next successful fetch (a manual retry / refetch clears `error`).
+    if (!node || !hasNextPage || isFetchingNextPage || error) return;
     const observer = new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting) fetchNextPage();
@@ -61,7 +65,7 @@ export function FeedView({
     );
     observer.observe(node);
     return () => observer.disconnect();
-  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
+  }, [hasNextPage, isFetchingNextPage, fetchNextPage, error]);
 
   return (
     <div className="flex flex-col gap-8 px-6 pb-6 pt-3">

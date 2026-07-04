@@ -307,9 +307,10 @@ export function VolumeControl({
         // raises, wheel-down lowers. Unmutes on any change so the
         // change is audible.
         const delta = e.deltaY < 0 ? 0.05 : -0.05;
-        const current = muted ? 0 : volume;
-        const next = Math.max(0, Math.min(1, current + delta));
-        if (muted && delta > 0) toggleMute();
+        // Adjust from the stored volume even when muted, so unmuting via the
+        // wheel restores the real level instead of resetting to 5%.
+        // setVolume already clears `muted`, so any wheel tick unmutes.
+        const next = Math.max(0, Math.min(1, volume + delta));
         setVolume(next);
       }}
     >

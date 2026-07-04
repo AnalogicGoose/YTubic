@@ -147,6 +147,9 @@ function LikedSongsView() {
     const el = sentinelRef.current;
     if (!el) return;
     if (!query.hasNextPage) return;
+    // Stop auto-loading once a continuation errored (avoids an unbounded
+    // retry loop while the sentinel stays visible).
+    if (query.error) return;
     const obs = new IntersectionObserver(
       (entries) => {
         for (const e of entries) {
@@ -159,7 +162,7 @@ function LikedSongsView() {
     );
     obs.observe(el);
     return () => obs.disconnect();
-  }, [query.hasNextPage, query.isFetchingNextPage, query.fetchNextPage]);
+  }, [query.hasNextPage, query.isFetchingNextPage, query.fetchNextPage, query.error]);
 
   // Only show the full error card before any tracks load; a failed
   // continuation must not wipe the already-loaded liked-songs list.

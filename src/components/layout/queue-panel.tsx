@@ -231,7 +231,14 @@ function QueueTabBody({
                   }}
                   onDrop={() => {
                     if (dragFrom !== null && dragFrom !== queueIdx) {
-                      onMoveTrack(dragFrom, queueIdx);
+                      // The drop indicator sits above the hovered row
+                      // ("insert before it"). For a downward move, splicing
+                      // the dragged item out first shifts the target down by
+                      // one, so subtract one to land before the row, not
+                      // after it (upward drags are already correct).
+                      const to =
+                        dragFrom < queueIdx ? queueIdx - 1 : queueIdx;
+                      onMoveTrack(dragFrom, to);
                     }
                     setDragFrom(null);
                     setDragOver(null);

@@ -104,6 +104,9 @@ function PlaylistPageView() {
     const el = sentinelRef.current;
     if (!el) return;
     if (!query.hasNextPage) return;
+    // Stop auto-loading once a continuation has errored, otherwise the
+    // still-visible sentinel re-fires fetchNextPage in an unbounded loop.
+    if (query.error) return;
     const obs = new IntersectionObserver(
       (entries) => {
         for (const e of entries) {
@@ -116,7 +119,7 @@ function PlaylistPageView() {
     );
     obs.observe(el);
     return () => obs.disconnect();
-  }, [query.hasNextPage, query.isFetchingNextPage, query.fetchNextPage]);
+  }, [query.hasNextPage, query.isFetchingNextPage, query.fetchNextPage, query.error]);
 
   // When the user picks any non-default sort, eagerly drain all
   // continuations so the sort applies to the whole playlist, not just
@@ -130,6 +133,8 @@ function PlaylistPageView() {
     if (sortMode === "default" && !normalizedQuery) return;
     if (!query.hasNextPage) return;
     if (query.isFetchingNextPage) return;
+    // Don't keep draining after an error — it would retry every 250 ms.
+    if (query.error) return;
     const t = setTimeout(() => query.fetchNextPage(), 250);
     return () => clearTimeout(t);
   }, [
@@ -138,6 +143,7 @@ function PlaylistPageView() {
     query.hasNextPage,
     query.isFetchingNextPage,
     query.fetchNextPage,
+    query.error,
   ]);
 
   // Only take over the whole view on error when nothing is loaded yet.

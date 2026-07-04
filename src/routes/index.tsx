@@ -32,7 +32,9 @@ function HomePage() {
   const sentinelRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const node = sentinelRef.current;
-    if (!node || !hasNextPage || isFetchingNextPage) return;
+    // `error` guard: stop auto-loading after a failed continuation so the
+    // still-visible sentinel doesn't re-fire fetchNextPage in a loop.
+    if (!node || !hasNextPage || isFetchingNextPage || error) return;
     const observer = new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting) fetchNextPage();
@@ -41,7 +43,7 @@ function HomePage() {
     );
     observer.observe(node);
     return () => observer.disconnect();
-  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
+  }, [hasNextPage, isFetchingNextPage, fetchNextPage, error]);
 
   return (
     <div className="flex flex-col gap-8 px-6 pb-6 pt-3">

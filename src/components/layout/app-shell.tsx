@@ -38,24 +38,31 @@ function useGlobalShortcuts() {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.defaultPrevented) return;
       if (isEditableTarget(e.target)) return;
-      // Block Tab focus navigation — Alt+Tab leaves focus on whichever
-      // button was last clicked, causing ghost activations on return.
-      if (e.key === "Tab") {
-        e.preventDefault();
-        (document.activeElement as HTMLElement | null)?.blur?.();
-        return;
-      }
-      // Space always toggles playback when the app is focused and the
-      // user isn't typing — otherwise it'd re-trigger whichever button
-      // happens to hold focus.
+      // Space toggles playback — but only when focus is NOT on an
+      // interactive control, so a button/link the user tabbed to still
+      // activates on Space. (Tab is no longer blocked window-wide; that
+      // previously killed all keyboard navigation, including in dialogs.)
       if (e.key === " " || e.code === "Space") {
         if (e.ctrlKey || e.metaKey || e.altKey) return;
+        const t = e.target as HTMLElement | null;
+        if (t?.closest("button, a, [role='button'], [tabindex]")) return;
         e.preventDefault();
         usePlaybackStore.getState().toggle();
       }
     };
+    // On window blur (e.g. Alt+Tab away) drop focus from whatever control
+    // was last clicked, so returning to the app doesn't leave a "ghost"
+    // focused button that Space/Enter would re-trigger.
+    const onWindowBlur = () => {
+      const el = document.activeElement as HTMLElement | null;
+      if (el && !isEditableTarget(el)) el.blur?.();
+    };
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    window.addEventListener("blur", onWindowBlur);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("blur", onWindowBlur);
+    };
   }, []);
 }
 

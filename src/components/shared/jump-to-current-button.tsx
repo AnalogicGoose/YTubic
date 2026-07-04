@@ -49,14 +49,27 @@ export function JumpToCurrentButton({ tracks }: Props) {
     setActiveOnScreen(false);
     setActiveAbove(false);
     if (!activeVideoId || !inList) return;
-    const el = document.querySelector<HTMLElement>(
+    // Resolve the (stable) scroller once, but NEVER cache the row node: the
+    // virtualized TrackList unmounts/remounts rows, so a captured node goes
+    // detached (getBoundingClientRect → 0) once it leaves the virtual window.
+    const row0 = document.querySelector<HTMLElement>(
       `[data-videoid="${CSS.escape(activeVideoId)}"]`,
     );
-    if (!el) return;
-    const scroller = el.closest<HTMLElement>(".app-scroll");
+    const scroller =
+      row0?.closest<HTMLElement>(".app-scroll") ??
+      document.querySelector<HTMLElement>(".app-scroll");
     if (!scroller) return;
 
     const update = () => {
+      const el = scroller.querySelector<HTMLElement>(
+        `[data-videoid="${CSS.escape(activeVideoId)}"]`,
+      );
+      if (!el) {
+        // Row is outside the virtual window → off-screen. Keep the last
+        // known arrow direction until it re-enters and we can recompute.
+        setActiveOnScreen(false);
+        return;
+      }
       const elRect = el.getBoundingClientRect();
       const scrollerRect = scroller.getBoundingClientRect();
       const visible =
