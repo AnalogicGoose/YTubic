@@ -16,14 +16,17 @@ jobs:
           node-version: 20
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Build
+        # Build first: the vite build generates src/routeTree.gen.ts
+        # (gitignored), which typecheck and lint need to resolve router
+        # types. Running tsc before it fails on a fresh checkout.
+        run: pnpm exec vite build
       - name: Typecheck
         run: pnpm exec tsc --noEmit
       - name: Lint
         run: pnpm lint
       - name: Test
         run: pnpm test
-      - name: Build
-        run: pnpm exec vite build
 
   rust:
     runs-on: ubuntu-latest
