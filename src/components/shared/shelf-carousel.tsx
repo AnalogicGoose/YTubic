@@ -1,13 +1,15 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { ShelfCard } from "@/components/shared/shelf-card";
 import { cn } from "@/lib/utils";
 import type { Shelf } from "@/lib/innertube/types";
 
 type Props = {
   shelf: Shelf;
+  /** Optional control rendered at the right of the shelf header (e.g. "Show all"). */
+  action?: ReactNode;
 };
 
-export function ShelfCarousel({ shelf }: Props) {
+export function ShelfCarousel({ shelf, action }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Make the carousel scroll horizontally with:
@@ -118,7 +120,9 @@ export function ShelfCarousel({ shelf }: Props) {
         <h2 className="truncate text-xl font-semibold tracking-tight">
           {shelf.title}
         </h2>
-        {shelf.subtitle ? (
+        {action ? (
+          <div className="shrink-0">{action}</div>
+        ) : shelf.subtitle ? (
           <span className="truncate text-sm text-muted-foreground">
             {shelf.subtitle}
           </span>

@@ -1,19 +1,46 @@
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { useQueries, useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import {
   AlertCircleIcon,
+  ChevronRightIcon,
   HistoryIcon,
+  Loader2Icon,
+  LogInIcon,
+  PlayIcon,
   SearchIcon,
+  ShuffleIcon,
+  XIcon,
 } from "lucide-react";
-import { fetchSearch, type SearchFilter } from "@/lib/innertube/search";
+import { toast } from "sonner";
+import {
+  fetchSearch,
+  GROUP_FILTER,
+  type SearchFilter,
+  type SearchGroup,
+} from "@/lib/innertube/search";
+import {
+  fetchPlaylistContinuation,
+  fetchPlaylistFirstPage,
+} from "@/lib/innertube/playlist";
+import { fetchWatchQueue } from "@/lib/innertube/radio";
 import { ShelfCarousel } from "@/components/shared/shelf-carousel";
+import { ShelfCard } from "@/components/shared/shelf-card";
 import { TrackList } from "@/components/shared/track-list";
+import { Thumbnail } from "@/components/shared/thumbnail";
+import { TrackContextMenu } from "@/components/shared/track-context-menu";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Input } from "@/components/ui/input";
 import { useSearchHistory } from "@/lib/store/search-history";
+import { usePlaybackStore } from "@/lib/store/playback";
 import { cn } from "@/lib/utils";
-import type { ShelfItem } from "@/lib/innertube/types";
+import type {
+  Shelf,
+  SearchResults,
+  ShelfItem,
+  TopResultAction,
+} from "@/lib/innertube/types";
 
 type SearchParams = {
   q?: string;
@@ -44,6 +71,9 @@ const FILTERS: SearchFilter[] = [
 ];
 const HISTORY_LIMIT = 5;
 
+/** Search scope: the public YTM catalog, or only the signed-in user's songs. */
+type Scope = "catalog" | "library";
+
 function useDebounced<T>(value: T, ms = 300): T {
   const [debounced, setDebounced] = useState(value);
   useEffect(() => {
@@ -53,54 +83,35 @@ function useDebounced<T>(value: T, ms = 300): T {
   return debounced;
 }
 
-// "all" tab keeps only Songs / Artists / Albums sections, in that order.
-// We hardcode hl=en in the InnerTube context, so shelf titles are always
-// in English — "Top result" gets dropped here too (its first item kind
-// is often "song" so the kind filter alone wouldn't catch it).
-const ALL_TAB_KIND_ORDER: Record<string, number> = {
-  song: 0,
-  artist: 1,
-  album: 2,
-};
-
 function SearchPage() {
   const { q = "", filter = "all" } = Route.useSearch();
-  const navigate = useNavigate({ from: Route.fullPath });
+  const [scope, setScope] = useState<Scope>("catalog");
 
   const query = q.trim();
   const { data, isLoading, isFetching, error } = useQuery({
     queryKey: ["search", query, filter],
     queryFn: () => fetchSearch(query, filter),
-    enabled: query.length > 0,
+    enabled: query.length > 0 && scope === "catalog",
     staleTime: 30_000,
   });
 
-  const visibleShelves = useMemo(() => {
-    if (!data) return [];
-    if (filter !== "all") return data.shelves;
-    return data.shelves
-      .filter((s) => {
-        if (s.title === "Top result") return false;
-        const kind = s.items[0]?.kind ?? "";
-        return kind in ALL_TAB_KIND_ORDER;
-      })
-      .sort(
-        (a, b) =>
-          (ALL_TAB_KIND_ORDER[a.items[0]?.kind ?? ""] ?? 99) -
-          (ALL_TAB_KIND_ORDER[b.items[0]?.kind ?? ""] ?? 99),
-      );
-  }, [data, filter]);
-
-  const songsList = useMemo<ShelfItem[]>(() => {
-    if (!data || filter !== "songs") return [];
-    const out: ShelfItem[] = [];
-    for (const shelf of data.shelves) {
-      for (const item of shelf.items) {
-        if (item.kind === "song") out.push(item);
-      }
-    }
-    return out;
-  }, [data, filter]);
+  // Lifted here (not inside LibraryResults) so the result count can sit up in
+  // the controls row — where the catalog filter chips live — instead of above
+  // the list.
+  const library = useLibrarySearch(
+    query,
+    scope === "library" && query.length > 0,
+  );
+  const libraryCount =
+    scope === "library" &&
+    query &&
+    library.isLoggedIn &&
+    !library.isLoading &&
+    library.matches.length > 0
+      ? `${library.matches.length} ${
+          library.matches.length === 1 ? "song" : "songs"
+        } in your library${library.truncated ? " (most recent)" : ""}`
+      : null;
 
   return (
     <div className="flex flex-col gap-6 px-6 pb-6 pt-3">
@@ -108,74 +119,577 @@ function SearchPage() {
         <h1 className="text-3xl font-bold tracking-tight">
           {query ? `Results for "${query}"` : "Search"}
         </h1>
-        {isFetching && !isLoading ? (
+        {scope === "catalog" && isFetching && !isLoading ? (
           <span className="text-xs text-muted-foreground">Searching…</span>
         ) : null}
       </div>
 
       <div className="flex flex-col gap-3">
         <SearchField filter={filter} urlQ={q} className="w-full" />
-        <div className="flex flex-wrap gap-1.5">
-          {FILTERS.map((f) => {
-            const isActive = filter === f;
-            return (
-              <button
-                key={f}
-                type="button"
-                onClick={() =>
-                  navigate({
-                    search: (s) => ({ ...s, filter: f }),
-                    replace: true,
-                  })
-                }
-                className={cn(
-                  "cursor-pointer rounded-full border px-3.5 py-1 text-sm font-medium transition-colors",
-                  isActive
-                    ? "border-transparent bg-foreground text-background"
-                    : "border-input bg-transparent text-foreground hover:bg-black/5 dark:bg-input/30 dark:hover:bg-white/15",
-                )}
-              >
-                {f.charAt(0).toUpperCase() + f.slice(1)}
-              </button>
-            );
-          })}
+        <div className="flex items-center gap-3">
+          {scope === "catalog" ? (
+            <FilterBar filter={filter} />
+          ) : (
+            <h2 className="min-w-0 flex-1 truncate text-xl font-semibold tracking-tight">
+              {libraryCount}
+            </h2>
+          )}
+          <ScopeToggle scope={scope} onChange={setScope} className="ml-auto" />
         </div>
       </div>
 
-      {!query ? null : error ? (
-        <div className="flex items-start gap-3 rounded-lg border border-destructive/40 bg-destructive/10 p-4 text-sm">
-          <AlertCircleIcon className="size-5 shrink-0 text-destructive" />
-          <div className="flex flex-col gap-1">
-            <span className="font-medium">Search failed</span>
-            <span className="text-muted-foreground">
-              {(error as Error).message}
-            </span>
-          </div>
-        </div>
+      {!query ? null : scope === "library" ? (
+        <LibraryResults state={library} query={query} />
+      ) : error ? (
+        <ErrorCard message={(error as Error).message} />
       ) : isLoading ? (
         <SearchSkeleton variant={filter === "songs" ? "list" : "shelves"} />
-      ) : filter === "songs" ? (
-        songsList.length > 0 ? (
-          <TrackList tracks={songsList} />
-        ) : (
-          <p className="text-sm text-muted-foreground">
-            No results for "{query}".
-          </p>
-        )
-      ) : visibleShelves.length > 0 ? (
-        <div className="flex flex-col gap-8">
-          {visibleShelves.map((shelf) => (
-            <ShelfCarousel key={shelf.id} shelf={shelf} />
-          ))}
-        </div>
+      ) : !data ? null : filter === "all" ? (
+        <AllResults data={data} />
       ) : (
-        <p className="text-sm text-muted-foreground">
-          No results for "{query}".
-        </p>
+        <FilterResults data={data} filter={filter} />
       )}
     </div>
   );
 }
+
+function FilterChip({
+  filter,
+  active,
+}: {
+  filter: SearchFilter;
+  active: boolean;
+}) {
+  const navigate = useNavigate({ from: Route.fullPath });
+  return (
+    <button
+      type="button"
+      onClick={() =>
+        navigate({ search: (s) => ({ ...s, filter }), replace: true })
+      }
+      className={cn(
+        "cursor-pointer rounded-full border px-3.5 py-1 text-sm font-medium transition-colors",
+        active
+          ? "border-transparent bg-foreground text-background"
+          : "border-input bg-transparent text-foreground hover:bg-black/5 dark:bg-input/30 dark:hover:bg-white/15",
+      )}
+    >
+      {filter.charAt(0).toUpperCase() + filter.slice(1)}
+    </button>
+  );
+}
+
+// The filter chips live in a horizontal scroller so a narrow window keeps the
+// controls on one line (chips scroll) instead of wrapping the scope toggle to
+// a second row. Edge fades (same as the shelf carousels) hint at hidden chips.
+function FilterBar({ filter }: { filter: SearchFilter }) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const RAMP = 48;
+    const update = () => {
+      const left = el.scrollLeft;
+      const right = el.scrollWidth - el.clientWidth - left;
+      el.style.setProperty("--fade-l", Math.max(0, 1 - left / RAMP).toFixed(3));
+      el.style.setProperty(
+        "--fade-r",
+        Math.max(0, 1 - right / RAMP).toFixed(3),
+      );
+    };
+    update();
+    el.addEventListener("scroll", update, { passive: true });
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => {
+      el.removeEventListener("scroll", update);
+      ro.disconnect();
+    };
+  }, []);
+
+  return (
+    <div
+      ref={scrollRef}
+      className="shelf-edge-fade min-w-0 flex-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+    >
+      <div className="flex w-max gap-1.5 py-0.5">
+        {FILTERS.map((f) => (
+          <FilterChip key={f} filter={f} active={filter === f} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ScopeToggle({
+  scope,
+  onChange,
+  className,
+}: {
+  scope: Scope;
+  onChange: (s: Scope) => void;
+  className?: string;
+}) {
+  return (
+    <div
+      className={cn(
+        "inline-flex shrink-0 rounded-full border border-input p-0.5",
+        className,
+      )}
+    >
+      {(
+        [
+          ["catalog", "Catalog"],
+          ["library", "My library"],
+        ] as const
+      ).map(([value, label]) => (
+        <button
+          key={value}
+          type="button"
+          onClick={() => onChange(value)}
+          className={cn(
+            "cursor-pointer rounded-full px-3 py-1 text-sm font-medium transition-colors",
+            scope === value
+              ? "bg-foreground text-background"
+              : "text-muted-foreground hover:text-foreground",
+          )}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// "all" tab — top-result hero + per-type sections
+// ---------------------------------------------------------------------------
+
+// The "all" tab shows a preview of each type. The unfiltered YTM response only
+// carries ~3 of each, so every section is *enriched* from its dedicated filter
+// query (up to ~20 results) — reusing the same cache key as the filter tab, so
+// the flat list paints instantly and then upgrades, and switching to a filter
+// tab / "Show all" is a cache hit. Songs stay a short list; the rest are
+// scrollable carousels capped to a generous preview.
+const ALL_SECTIONS: {
+  filter: SearchFilter;
+  title: string;
+  display: "list" | "card";
+  cap: number;
+}[] = [
+  { filter: "songs", title: "Songs", display: "list", cap: 8 },
+  { filter: "artists", title: "Artists", display: "card", cap: 15 },
+  { filter: "albums", title: "Albums & singles", display: "card", cap: 15 },
+  { filter: "videos", title: "Videos", display: "card", cap: 15 },
+  {
+    filter: "playlists",
+    title: "Community playlists",
+    display: "card",
+    cap: 15,
+  },
+];
+
+function AllResults({ data }: { data: SearchResults }) {
+  const { topResult, query } = data;
+
+  // Per-type items from the single "all" response — the instant first paint.
+  const fallback = useMemo(() => {
+    const m = new Map<SearchFilter, ShelfItem[]>();
+    for (const shelf of data.shelves) {
+      const group = shelf.id.slice("all-".length) as SearchGroup;
+      const f = GROUP_FILTER[group];
+      if (f) m.set(f, shelf.items);
+    }
+    return m;
+  }, [data.shelves]);
+
+  const enrich = useQueries({
+    queries: ALL_SECTIONS.map((s) => ({
+      queryKey: ["search", query, s.filter],
+      queryFn: () => fetchSearch(query, s.filter),
+      enabled: query.length > 0,
+      staleTime: 30_000,
+    })),
+  });
+
+  // The promoted entity is also the #1 hit in its own filter tab, so drop it
+  // from that section to avoid showing it twice (hero + first card). Filter
+  // before capping so removing it doesn't shrink the preview below its count.
+  const topKey = topResult ? `${topResult.kind}:${topResult.id}` : null;
+  const sections = ALL_SECTIONS.map((s, i) => {
+    const enriched = enrich[i].data?.shelves.flatMap((sh) => sh.items) ?? [];
+    const source = enriched.length ? enriched : (fallback.get(s.filter) ?? []);
+    const deduped = topKey
+      ? source.filter((it) => `${it.kind}:${it.id}` !== topKey)
+      : source;
+    return {
+      ...s,
+      items: deduped.slice(0, s.cap),
+      loading: enrich[i].isLoading,
+    };
+  });
+
+  const hasAny = Boolean(topResult) || sections.some((s) => s.items.length > 0);
+  const stillLoading = sections.some((s) => s.loading);
+  if (!hasAny && !stillLoading) {
+    // Nothing to show and every section settled — distinguish a genuine empty
+    // result from a transient failure where all enrichment queries errored.
+    const enrichError = enrich.find((e) => e.isError)?.error as
+      Error | undefined;
+    if (!topResult && enrichError && enrich.every((e) => e.isError)) {
+      return <ErrorCard message={enrichError.message} />;
+    }
+    return <NoResults query={query} />;
+  }
+
+  return (
+    <div className="flex flex-col gap-8">
+      {topResult ? (
+        <TopResultHero item={topResult} action={data.topResultAction} />
+      ) : null}
+
+      {sections.map((s) => {
+        if (s.items.length === 0) {
+          return s.loading ? (
+            <ShelfSkeleton key={s.filter} title={s.title} display={s.display} />
+          ) : null;
+        }
+
+        const showAll = (
+          <Link
+            to="/search"
+            search={{ q: query, filter: s.filter }}
+            replace
+            className="inline-flex shrink-0 items-center gap-0.5 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
+          >
+            Show all
+            <ChevronRightIcon className="size-4" />
+          </Link>
+        );
+
+        if (s.display === "list") {
+          return (
+            <section key={s.filter} className="flex flex-col gap-3">
+              <div className="flex items-baseline justify-between gap-3 px-1">
+                <h2 className="truncate text-xl font-semibold tracking-tight">
+                  {s.title}
+                </h2>
+                {showAll}
+              </div>
+              <TrackList tracks={s.items} />
+            </section>
+          );
+        }
+
+        const shelf: Shelf = {
+          id: `all-${s.filter}`,
+          title: s.title,
+          items: s.items,
+        };
+        return <ShelfCarousel key={s.filter} shelf={shelf} action={showAll} />;
+      })}
+    </div>
+  );
+}
+
+function TopResultHero({
+  item,
+  action,
+}: {
+  item: ShelfItem;
+  action?: TopResultAction;
+}) {
+  const [pending, setPending] = useState(false);
+  const radius = item.round
+    ? "rounded-full"
+    : item.kind === "album" || item.kind === "playlist"
+      ? "rounded-lg"
+      : "rounded-md";
+  const isEntity =
+    item.kind === "artist" || item.kind === "album" || item.kind === "playlist";
+
+  const runAction = async () => {
+    if (!action || pending) return;
+    const store = usePlaybackStore.getState();
+    if (action.videoId) {
+      store.playNow(item);
+      return;
+    }
+    if (!action.playlistId) return;
+    setPending(true);
+    try {
+      const tracks = await fetchWatchQueue(action.playlistId);
+      if (tracks.length) store.playShelfItems(tracks, 0);
+      else toast.error("Couldn't start playback — no tracks returned.");
+    } catch (e) {
+      toast.error(`Couldn't start playback: ${(e as Error).message}`);
+    } finally {
+      setPending(false);
+    }
+  };
+
+  // The whole card is the click target: a full-bleed link (entity) or play
+  // button (song/video) sits behind the content, which is pointer-events-none
+  // so clicks fall through to it. Only the Shuffle/Play button opts back into
+  // pointer events (it layers on top), so it triggers its own action.
+  const overlayCls =
+    "absolute inset-0 rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset";
+  const overlay =
+    item.kind === "artist" ? (
+      <Link
+        to="/artist/$id"
+        params={{ id: item.id }}
+        aria-label={item.title}
+        className={overlayCls}
+      />
+    ) : item.kind === "album" ? (
+      <Link
+        to="/album/$id"
+        params={{ id: item.id }}
+        aria-label={item.title}
+        className={overlayCls}
+      />
+    ) : item.kind === "playlist" ? (
+      <Link
+        to="/playlist/$id"
+        params={{ id: item.id }}
+        aria-label={item.title}
+        className={overlayCls}
+      />
+    ) : (
+      <button
+        type="button"
+        aria-label={`Play ${item.title}`}
+        onClick={() => usePlaybackStore.getState().playNow(item)}
+        className={cn(overlayCls, "cursor-pointer")}
+      />
+    );
+
+  const card = (
+    <div className="relative flex items-center gap-3 rounded-xl border bg-card/40 p-4 pr-5 transition-colors hover:bg-white/[0.06]">
+      {overlay}
+
+      <div className="pointer-events-none relative flex min-w-0 flex-1 items-center gap-5">
+        <div className={cn("relative size-24 shrink-0 md:size-28", radius)}>
+          <Thumbnail
+            thumbnails={item.thumbnails}
+            alt={item.title}
+            round={item.round}
+            className={cn("size-full", radius)}
+            targetSize={320}
+            highRes
+          />
+          <div
+            aria-hidden="true"
+            className={cn(
+              "pointer-events-none absolute inset-0 border border-hairline",
+              radius,
+            )}
+          />
+        </div>
+        <div className="flex min-w-0 flex-col gap-1">
+          <span className="truncate text-3xl font-bold tracking-tight">
+            {item.title}
+          </span>
+          {item.subtitle ? (
+            <span className="truncate text-sm text-muted-foreground">
+              {item.subtitle}
+            </span>
+          ) : null}
+        </div>
+      </div>
+
+      {action ? (
+        <button
+          type="button"
+          onClick={runAction}
+          disabled={pending}
+          aria-label={action.label}
+          className="pointer-events-auto relative z-10 inline-flex shrink-0 items-center gap-2 rounded-full border border-input bg-white/5 px-5 py-2.5 text-sm font-semibold transition-colors hover:bg-white/10 disabled:opacity-60"
+        >
+          {pending ? (
+            <Loader2Icon className="size-4 animate-spin" />
+          ) : action.kind === "shuffle" ? (
+            <ShuffleIcon className="size-4" />
+          ) : (
+            <PlayIcon className="size-4 fill-current" />
+          )}
+          {action.label}
+        </button>
+      ) : null}
+
+      {isEntity ? (
+        <ChevronRightIcon className="pointer-events-none relative size-6 shrink-0 text-muted-foreground" />
+      ) : null}
+    </div>
+  );
+
+  return (
+    <section className="flex flex-col gap-3">
+      <h2 className="px-1 text-xl font-semibold tracking-tight">Top result</h2>
+      {item.kind === "song" || item.kind === "video" ? (
+        <TrackContextMenu item={item}>{card}</TrackContextMenu>
+      ) : (
+        card
+      )}
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// A single filter tab (Songs / Artists / Albums / …) — full-page list or grid
+// ---------------------------------------------------------------------------
+
+function FilterResults({
+  data,
+  filter,
+}: {
+  data: SearchResults;
+  filter: SearchFilter;
+}) {
+  const items = useMemo(
+    () => data.shelves.flatMap((s) => s.items),
+    [data.shelves],
+  );
+
+  if (items.length === 0) return <NoResults query={data.query} />;
+
+  // Songs read best as the familiar dense table; everything else fills the
+  // page as a responsive card grid instead of a single horizontal row.
+  if (filter === "songs") return <TrackList tracks={items} />;
+
+  const gridClass =
+    filter === "videos"
+      ? "grid w-full gap-3 grid-cols-[repeat(auto-fill,minmax(min(100%,16rem),1fr))]"
+      : "grid w-full gap-2 grid-cols-[repeat(auto-fill,minmax(min(100%,11rem),1fr))] [&>*]:max-w-[20rem]";
+
+  return (
+    <div className={gridClass}>
+      {items.map((item) => (
+        <ShelfCard key={`${item.kind}:${item.id}`} item={item} />
+      ))}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// "My library" scope — filter the signed-in user's liked songs client-side
+// ---------------------------------------------------------------------------
+
+// Cap how many liked-songs pages we page through before filtering, so a huge
+// library doesn't fan out into dozens of continuation calls on every search.
+const LIBRARY_MAX_PAGES = 20;
+
+type LibrarySearchState = {
+  isLoggedIn: boolean;
+  loggedInKnown: boolean;
+  isLoading: boolean;
+  error: Error | null;
+  matches: ShelfItem[];
+  truncated: boolean;
+};
+
+/**
+ * Filter the signed-in user's liked songs by the query, client-side. Lifted
+ * to a hook so both the controls row (the result count) and the list body
+ * share one query/computation.
+ */
+function useLibrarySearch(query: string, enabled: boolean): LibrarySearchState {
+  const loggedIn = useQuery({
+    queryKey: ["auth-logged-in"],
+    queryFn: () => invoke<boolean>("is_logged_in"),
+    staleTime: 30_000,
+  });
+
+  const lib = useQuery({
+    queryKey: ["library", "liked-songs-all"],
+    enabled: enabled && loggedIn.data === true,
+    staleTime: 5 * 60 * 1000,
+    queryFn: async () => {
+      const first = await fetchPlaylistFirstPage("LM");
+      let tracks = first.tracks;
+      let token = first.continuationToken;
+      let pages = 1;
+      while (token && pages < LIBRARY_MAX_PAGES) {
+        const next = await fetchPlaylistContinuation(token);
+        tracks = tracks.concat(next.tracks);
+        token = next.continuationToken;
+        pages += 1;
+      }
+      return { tracks, truncated: Boolean(token) };
+    },
+  });
+
+  const needle = query.toLowerCase();
+  const matches = useMemo(() => {
+    const all = lib.data?.tracks ?? [];
+    if (!needle) return all;
+    return all.filter(
+      (t) =>
+        t.title.toLowerCase().includes(needle) ||
+        (t.subtitle?.toLowerCase().includes(needle) ?? false) ||
+        (t.album?.toLowerCase().includes(needle) ?? false) ||
+        (t.artists?.some((a) => a.name.toLowerCase().includes(needle)) ??
+          false),
+    );
+  }, [lib.data, needle]);
+
+  return {
+    isLoggedIn: loggedIn.data === true,
+    loggedInKnown: loggedIn.data !== undefined,
+    isLoading: loggedIn.isLoading || lib.isLoading,
+    error: (lib.error as Error) ?? null,
+    matches,
+    truncated: lib.data?.truncated ?? false,
+  };
+}
+
+function LibraryResults({
+  state,
+  query,
+}: {
+  state: LibrarySearchState;
+  query: string;
+}) {
+  if (state.loggedInKnown && !state.isLoggedIn) return <LibrarySignInHint />;
+  if (state.isLoading) return <SearchSkeleton variant="list" />;
+  if (state.error) return <ErrorCard message={state.error.message} />;
+  if (state.matches.length === 0) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        No songs in your library match "{query}".
+      </p>
+    );
+  }
+  return <TrackList tracks={state.matches} />;
+}
+
+function LibrarySignInHint() {
+  return (
+    <div className="flex flex-col items-center gap-4 p-12 text-center">
+      <LogInIcon className="size-12 text-muted-foreground" />
+      <div className="flex flex-col gap-1">
+        <h2 className="text-xl font-semibold">
+          Sign in to search your library
+        </h2>
+        <p className="text-sm text-muted-foreground">
+          Import your YouTube Music session to search your liked songs.
+        </p>
+      </div>
+      <Link
+        to="/settings"
+        className="rounded-md bg-foreground px-4 py-2 text-sm font-medium text-background transition-opacity hover:opacity-90"
+      >
+        Go to Settings
+      </Link>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Search input
+// ---------------------------------------------------------------------------
 
 function SearchField({
   filter,
@@ -256,8 +770,23 @@ function SearchField({
     });
   };
 
+  const clear = () => {
+    userTypedRef.current = true;
+    setValue("");
+    inputRef.current?.focus();
+    navigate({
+      to: "/search",
+      search: { q: undefined, filter },
+      replace: true,
+    });
+  };
+
   const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Escape") {
+      if (value) {
+        clear();
+        return;
+      }
       setFocused(false);
       inputRef.current?.blur();
       return;
@@ -288,7 +817,7 @@ function SearchField({
         <Input
           ref={inputRef}
           placeholder="Search songs, albums, artists…"
-          className="pl-9"
+          className="pl-9 pr-9"
           value={value}
           onChange={(e) => {
             userTypedRef.current = true;
@@ -305,6 +834,16 @@ function SearchField({
           }}
           onKeyDown={onKeyDown}
         />
+        {value ? (
+          <button
+            type="button"
+            aria-label="Clear search"
+            onClick={clear}
+            className="absolute right-2 top-1/2 flex size-6 -translate-y-1/2 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          >
+            <XIcon className="size-4" />
+          </button>
+        ) : null}
       </form>
 
       {showDropdown && (
@@ -346,6 +885,70 @@ function SearchField({
         </div>
       )}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Shared bits
+// ---------------------------------------------------------------------------
+
+function NoResults({ query }: { query: string }) {
+  return (
+    <p className="text-sm text-muted-foreground">No results for "{query}".</p>
+  );
+}
+
+function ErrorCard({ message }: { message: string }) {
+  return (
+    <div className="flex items-start gap-3 rounded-lg border border-destructive/40 bg-destructive/10 p-4 text-sm">
+      <AlertCircleIcon className="size-5 shrink-0 text-destructive" />
+      <div className="flex flex-col gap-1">
+        <span className="font-medium">Search failed</span>
+        <span className="text-muted-foreground">{message}</span>
+      </div>
+    </div>
+  );
+}
+
+function ShelfSkeleton({
+  title,
+  display = "card",
+}: {
+  title: string;
+  display?: "list" | "card";
+}) {
+  return (
+    <section className="flex flex-col gap-3">
+      <h2 className="px-1 text-xl font-semibold tracking-tight text-muted-foreground/60">
+        {title}
+      </h2>
+      {display === "list" ? (
+        <div className="flex flex-col gap-1">
+          {Array.from({ length: 5 }).map((_, i) => (
+            <div key={i} className="flex items-center gap-3 p-2">
+              <Skeleton className="size-10 shrink-0 rounded-sm" />
+              <div className="flex flex-1 flex-col gap-1.5">
+                <Skeleton className="h-4 w-1/3" />
+                <Skeleton className="h-3 w-1/4" />
+              </div>
+              <Skeleton className="h-3 w-10 shrink-0" />
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="flex gap-2 overflow-hidden">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <div key={i} className="w-44 shrink-0 md:w-48 lg:w-52">
+              <div className="flex flex-col gap-2 p-2">
+                <Skeleton className="aspect-square w-full" />
+                <Skeleton className="h-4 w-3/4" />
+                <Skeleton className="h-3 w-1/2" />
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 

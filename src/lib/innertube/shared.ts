@@ -120,21 +120,20 @@ async function loadCookieHeader(): Promise<string> {
   const epoch = cookieEpoch;
   cookiePromise = invoke<string>("get_cookie_header", {
     host: "music.youtube.com",
-  })
-    .then(
-      (value) => {
-        cookiePromise = null;
-        if (epoch !== cookieEpoch) return "";
-        cookieCache = { value, loadedAt: Date.now() };
-        return value;
-      },
-      () => {
-        cookiePromise = null;
-        if (epoch !== cookieEpoch) return "";
-        cookieCache = { value: "", loadedAt: Date.now() };
-        return "";
-      },
-    );
+  }).then(
+    (value) => {
+      cookiePromise = null;
+      if (epoch !== cookieEpoch) return "";
+      cookieCache = { value, loadedAt: Date.now() };
+      return value;
+    },
+    () => {
+      cookiePromise = null;
+      if (epoch !== cookieEpoch) return "";
+      cookieCache = { value: "", loadedAt: Date.now() };
+      return "";
+    },
+  );
   return cookiePromise;
 }
 
@@ -197,10 +196,7 @@ export async function innertubePost(
   return json;
 }
 
-export function rawBrowse(
-  browseId: string,
-  params?: string,
-): Promise<YtNode> {
+export function rawBrowse(browseId: string, params?: string): Promise<YtNode> {
   const body: Record<string, unknown> = { browseId };
   if (params) body.params = params;
   return innertubePost("browse", body);
@@ -285,11 +281,10 @@ export function mapPlaylistPanelVideo(raw: YtNode): ShelfItem | null {
   let albumId: string | undefined;
   for (const run of subtitleRuns) {
     const browseId = run.navigationEndpoint?.browseEndpoint?.browseId as
-      | string
-      | undefined;
+      string | undefined;
     const pageType = run.navigationEndpoint?.browseEndpoint
-      ?.browseEndpointContextSupportedConfigs
-      ?.browseEndpointContextMusicConfig?.pageType as string | undefined;
+      ?.browseEndpointContextSupportedConfigs?.browseEndpointContextMusicConfig
+      ?.pageType as string | undefined;
     if (browseId && pageType?.includes("ARTIST")) {
       artists.push({ id: browseId, name: run.text ?? "" });
     } else if (browseId && pageType?.includes("ALBUM")) {
@@ -323,10 +318,7 @@ export function mapPlaylistPanelVideo(raw: YtNode): ShelfItem | null {
  * `badges` too).
  */
 export function readExplicit(raw: YtNode): boolean {
-  const buckets: YtNode[][] = [
-    raw.badges ?? [],
-    raw.subtitleBadges ?? [],
-  ];
+  const buckets: YtNode[][] = [raw.badges ?? [], raw.subtitleBadges ?? []];
   for (const bucket of buckets) {
     for (const b of bucket) {
       const r = b.musicInlineBadgeRenderer;
@@ -335,8 +327,7 @@ export function readExplicit(raw: YtNode): boolean {
       if (typeof iconType === "string" && iconType.includes("EXPLICIT"))
         return true;
       const label =
-        r.accessibilityData?.accessibilityData?.label ??
-        r.accessibilityText;
+        r.accessibilityData?.accessibilityData?.label ?? r.accessibilityText;
       if (typeof label === "string" && /explicit/i.test(label)) return true;
     }
   }
@@ -379,7 +370,9 @@ export function deepFindThumbnails(node: YtNode | undefined): Thumbnail[] {
     if (Array.isArray(obj.thumbnails) && obj.thumbnails.length) {
       const mapped = (obj.thumbnails as YtNode[])
         .map((t) => ({ url: t.url, width: t.width, height: t.height }))
-        .filter((t: Thumbnail) => typeof t.url === "string" && t.url.length > 0);
+        .filter(
+          (t: Thumbnail) => typeof t.url === "string" && t.url.length > 0,
+        );
       if (mapped.length) {
         result = mapped;
         return;
@@ -442,7 +435,7 @@ export function parseDuration(text: string): number | undefined {
   return undefined;
 }
 
-function pageTypeToKind(pageType: string): ShelfItem["kind"] | null {
+export function pageTypeToKind(pageType: string): ShelfItem["kind"] | null {
   if (pageType.includes("ARTIST")) return "artist";
   if (pageType.includes("ALBUM")) return "album";
   if (pageType.includes("PLAYLIST") || pageType.includes("PODCAST_SHOW"))
@@ -511,11 +504,10 @@ export function mapTwoRowItem(raw: YtNode): ShelfItem | null {
   const artists: { id?: string; name: string }[] = [];
   for (const run of subtitleRuns) {
     const browseId = run.navigationEndpoint?.browseEndpoint?.browseId as
-      | string
-      | undefined;
+      string | undefined;
     const pageType = run.navigationEndpoint?.browseEndpoint
-      ?.browseEndpointContextSupportedConfigs
-      ?.browseEndpointContextMusicConfig?.pageType as string | undefined;
+      ?.browseEndpointContextSupportedConfigs?.browseEndpointContextMusicConfig
+      ?.pageType as string | undefined;
     if (browseId && pageType?.includes("ARTIST")) {
       artists.push({ id: browseId, name: run.text ?? "" });
     }
@@ -543,8 +535,7 @@ export function mapTwoRowItem(raw: YtNode): ShelfItem | null {
     // and 1:1 for songs. The watchEndpoint itself doesn't tell us which,
     // but the thumbnail aspect ratio is a reliable signal.
     const widest = thumbnails.reduce(
-      (m, t) =>
-        (t.width ?? 0) > (m?.width ?? 0) ? t : m,
+      (m, t) => ((t.width ?? 0) > (m?.width ?? 0) ? t : m),
       thumbnails[0],
     );
     const ratio =
@@ -694,8 +685,16 @@ export function mapResponsiveListItem(raw: YtNode): ShelfItem | null {
   // synthesize one from the videoId when the row came up empty.
   if (thumbnails.length === 0 && videoId) {
     thumbnails = [
-      { url: `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`, width: 320, height: 180 },
-      { url: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`, width: 480, height: 360 },
+      {
+        url: `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`,
+        width: 320,
+        height: 180,
+      },
+      {
+        url: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+        width: 480,
+        height: 360,
+      },
     ];
   }
 
@@ -705,11 +704,11 @@ export function mapResponsiveListItem(raw: YtNode): ShelfItem | null {
     raw.navigationEndpoint?.browseEndpoint?.browseId;
   const navPageType: string =
     titleCol?.navigationEndpoint?.browseEndpoint
-      ?.browseEndpointContextSupportedConfigs
-      ?.browseEndpointContextMusicConfig?.pageType ??
+      ?.browseEndpointContextSupportedConfigs?.browseEndpointContextMusicConfig
+      ?.pageType ??
     raw.navigationEndpoint?.browseEndpoint
-      ?.browseEndpointContextSupportedConfigs
-      ?.browseEndpointContextMusicConfig?.pageType ??
+      ?.browseEndpointContextSupportedConfigs?.browseEndpointContextMusicConfig
+      ?.pageType ??
     "";
 
   const subtitleText =

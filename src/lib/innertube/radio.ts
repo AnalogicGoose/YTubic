@@ -9,13 +9,8 @@ import { mapPlaylistPanelVideo, rawNext, type YtNode } from "./shared";
  *
  * Returns the seed track followed by ~24 recommended tracks.
  */
-export async function fetchRadio(videoId: string): Promise<ShelfItem[]> {
-  const json = await rawNext({
-    videoId,
-    playlistId: `RDAMVM${videoId}`,
-    isAudioOnly: true,
-  });
-
+/** Pull the queue rows out of a /next `playlistPanelRenderer` response. */
+function parsePanelTracks(json: YtNode): ShelfItem[] {
   const panelContents: YtNode[] =
     json?.contents?.singleColumnMusicWatchNextResultsRenderer?.tabbedRenderer
       ?.watchNextTabbedResultsRenderer?.tabs?.[0]?.tabRenderer?.content
@@ -33,10 +28,34 @@ export async function fetchRadio(videoId: string): Promise<ShelfItem[]> {
     const mapped = mapPlaylistPanelVideo(row);
     if (mapped) tracks.push(mapped);
   }
+  return tracks;
+}
 
+export async function fetchRadio(videoId: string): Promise<ShelfItem[]> {
+  const tracks = parsePanelTracks(
+    await rawNext({
+      videoId,
+      playlistId: `RDAMVM${videoId}`,
+      isAudioOnly: true,
+    }),
+  );
   if (import.meta.env.DEV) {
     console.debug("[radio] seed=", videoId, "tracks=", tracks.length);
   }
-
   return tracks;
+}
+
+/**
+ * Build a play queue from a watch-playlist id — the kind the search
+ * top-result card's Shuffle / Play button hands us: an artist shuffle
+ * radio (`RDAO…`), an album (`OLAK…`), or a community playlist (`VL…` /
+ * `RDCLAK…`). /next expands it into a `playlistPanelRenderer` of tracks.
+ */
+export async function fetchWatchQueue(
+  playlistId: string,
+  videoId?: string,
+): Promise<ShelfItem[]> {
+  const body: Record<string, unknown> = { playlistId, isAudioOnly: true };
+  if (videoId) body.videoId = videoId;
+  return parsePanelTracks(await rawNext(body));
 }

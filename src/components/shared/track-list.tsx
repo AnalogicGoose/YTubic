@@ -124,7 +124,8 @@ export function TrackList({
     ro.observe(scrollEl);
     // Also observe the immediate parent (route content) so header
     // expansions trigger a recompute. Falls back to scroll listener.
-    if (listRef.current?.parentElement) ro.observe(listRef.current.parentElement);
+    if (listRef.current?.parentElement)
+      ro.observe(listRef.current.parentElement);
     return () => ro.disconnect();
   }, [scrollEl, tracks.length]);
 
@@ -147,7 +148,7 @@ export function TrackList({
   // "Duration" vs. "3:32") and the columns would visually drift apart.
   const gridTemplate = [
     "minmax(0,2fr)", // TRACK (thumb/index + title) — 2x weight so long
-                     // titles get the breathing room before truncation
+    // titles get the breathing room before truncation
     "minmax(0,1fr)", // ARTIST
     showAlbum ? "minmax(0,1fr)" : null, // ALBUM
     showPlays ? "5rem" : "3.5rem", // DURATION or PLAYS — plays is wider
@@ -177,17 +178,6 @@ export function TrackList({
 
   return (
     <div className={cn("flex flex-col", className)}>
-      <div
-        style={{ gridTemplateColumns: gridTemplate }}
-        className="grid items-center gap-3 border-b px-2 pb-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground"
-      >
-        <span className={hideThumbnails ? "" : "pl-[52px]"}>Track</span>
-        <span>Artist</span>
-        {showAlbum ? <span>Album</span> : null}
-        <span className="text-right">{showPlays ? "Plays" : "Duration"}</span>
-        <span className="text-right">Actions</span>
-      </div>
-
       <div
         ref={listRef}
         style={{

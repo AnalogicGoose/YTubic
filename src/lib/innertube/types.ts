@@ -10,12 +10,7 @@ export type MinimalArtist = {
 };
 
 export type ShelfItemKind =
-  | "song"
-  | "video"
-  | "album"
-  | "playlist"
-  | "artist"
-  | "category";
+  "song" | "video" | "album" | "playlist" | "artist" | "category";
 
 export type ShelfItem = {
   kind: ShelfItemKind;
@@ -107,7 +102,27 @@ export type PlaylistPage = {
   tracks: ShelfItem[];
 };
 
+/**
+ * The primary action YTM attaches to the top-result card — a "Shuffle"
+ * (artist) or "Play" (song / album / playlist) button. Either a direct
+ * `videoId` (play it) or a `playlistId` to expand into a queue via /next.
+ */
+export type TopResultAction = {
+  label: string;
+  kind: "shuffle" | "play";
+  videoId?: string;
+  playlistId?: string;
+};
+
 export type SearchResults = {
   query: string;
+  /**
+   * The "Top result" hero (only on the "all" tab) — the single best-matching
+   * entity (artist / album / song / video / playlist) YTM promotes above the
+   * grouped result sections.
+   */
+  topResult?: ShelfItem;
+  /** The top-result card's Shuffle / Play button, when present. */
+  topResultAction?: TopResultAction;
   shelves: Shelf[];
 };
