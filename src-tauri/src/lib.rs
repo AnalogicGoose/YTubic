@@ -628,11 +628,81 @@ async fn is_logged_in(app: tauri::AppHandle) -> Result<bool, String> {
 }
 
 /// Hard-exit the process. The window's close button hides into the tray
-/// (see `WindowEvent::CloseRequested` below); this command is the
-/// frontend's equivalent of the tray's Quit menu item.
+/// by default (see `WindowEvent::CloseRequested` below); this command is
+/// the frontend's equivalent of the tray's Quit menu item.
 #[tauri::command]
 fn quit_app(app: tauri::AppHandle) {
     app.exit(0);
+}
+
+/// What the title-bar ✕ does, mirrored from the frontend settings store
+/// (`useCloseBehaviorSync`). Lives in Rust rather than only in
+/// localStorage because the decision point is the `CloseRequested`
+/// window event, which must also cover Alt+F4 and the taskbar's Close.
+/// Defaults to hide-to-tray until the frontend pushes a value shortly
+/// after the webview boots.
+#[derive(Default)]
+struct CloseBehavior {
+    quit_on_close: AtomicBool,
+}
+
+#[tauri::command]
+fn set_close_behavior(
+    state: tauri::State<'_, CloseBehavior>,
+    quit_on_close: bool,
+) {
+    state.quit_on_close.store(quit_on_close, Ordering::Relaxed);
+}
+
+/// Register / unregister the app for launch at OS startup. Uses the
+/// autostart plugin's Rust API from our own command so the frontend
+/// needs no extra capability grants.
+#[tauri::command]
+fn autostart_set(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let autolaunch = app.autolaunch();
+    let currently = autolaunch.is_enabled().unwrap_or(false);
+    if enabled == currently {
+        return Ok(());
+    }
+    if enabled {
+        autolaunch.enable().map_err(|e| e.to_string())
+    } else {
+        autolaunch.disable().map_err(|e| e.to_string())
+    }
+}
+
+#[tauri::command]
+fn autostart_is_enabled(app: tauri::AppHandle) -> Result<bool, String> {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch().is_enabled().map_err(|e| e.to_string())
+}
+
+/// Track-change toast (Settings → General → Playback notifications).
+/// The focus check lives here rather than in JS so it covers every
+/// window at once: a toast is only useful when the user isn't already
+/// looking at the app (main window hidden to tray, or another app in
+/// the foreground).
+#[tauri::command]
+fn notify_track(
+    app: tauri::AppHandle,
+    title: String,
+    body: String,
+) -> Result<(), String> {
+    use tauri_plugin_notification::NotificationExt;
+    let any_focused = app
+        .webview_windows()
+        .values()
+        .any(|w| w.is_focused().unwrap_or(false));
+    if any_focused {
+        return Ok(());
+    }
+    app.notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show()
+        .map_err(|e| e.to_string())
 }
 
 /// Bring the main window to the front. Called from the floating
@@ -915,11 +985,119 @@ async fn get_active_account_id(app: tauri::AppHandle) -> Result<Option<String>, 
     Ok(read_index(&app).await.active)
 }
 
-fn stream_cache_dir(app: &tauri::AppHandle) -> PathBuf {
+/// File (under the store plugin's default dir) + key holding the
+/// user-chosen cache root. Written by `set_cache_dir`, read once at
+/// startup — the stream server captures its directories when it
+/// spawns, so a change only applies on the next launch.
+const SETTINGS_STORE_FILE: &str = "settings.json";
+const CACHE_DIR_KEY: &str = "cacheDir";
+
+/// The cache root this process actually started with (managed state,
+/// set in `setup`). All track/cover cache paths derive from it so the
+/// commands and the running stream server always agree, even when the
+/// stored preference already points somewhere new.
+struct ActiveCacheRoot(PathBuf);
+
+fn default_cache_root(app: &tauri::AppHandle) -> PathBuf {
     app.path()
         .app_cache_dir()
         .unwrap_or_else(|_| std::env::temp_dir())
-        .join("stream")
+}
+
+/// User-chosen cache root from the settings store, if any.
+fn stored_cache_root(app: &tauri::AppHandle) -> Option<PathBuf> {
+    use tauri_plugin_store::StoreExt;
+    let store = app.store(SETTINGS_STORE_FILE).ok()?;
+    let value = store.get(CACHE_DIR_KEY)?;
+    let s = value.as_str()?.trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(s))
+    }
+}
+
+fn stream_cache_dir(app: &tauri::AppHandle) -> PathBuf {
+    app.state::<ActiveCacheRoot>().0.join("stream")
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CacheDirInfo {
+    /// Root that will be used from the next launch on.
+    path: String,
+    default_path: String,
+    is_custom: bool,
+    /// True when the stored preference differs from what this process
+    /// is running with — i.e. a restart is pending.
+    needs_restart: bool,
+}
+
+#[tauri::command]
+fn get_cache_dir(app: tauri::AppHandle) -> CacheDirInfo {
+    let default = default_cache_root(&app);
+    let stored = stored_cache_root(&app);
+    let active = app.state::<ActiveCacheRoot>().0.clone();
+    let effective = stored.clone().unwrap_or_else(|| default.clone());
+    CacheDirInfo {
+        needs_restart: effective != active,
+        path: effective.display().to_string(),
+        default_path: default.display().to_string(),
+        is_custom: stored.is_some(),
+    }
+}
+
+/// Persist a new cache root (`None` resets to the default). Validates
+/// that the folder exists and is writable before saving; the change
+/// takes effect on the next launch.
+#[tauri::command]
+async fn set_cache_dir(
+    app: tauri::AppHandle,
+    path: Option<String>,
+) -> Result<(), String> {
+    use tauri_plugin_store::StoreExt;
+    let store = app
+        .store(SETTINGS_STORE_FILE)
+        .map_err(|e| format!("open settings store: {e}"))?;
+    match path {
+        None => {
+            store.delete(CACHE_DIR_KEY);
+        }
+        Some(raw) => {
+            let raw = raw.trim().to_string();
+            let dir = PathBuf::from(&raw);
+            if raw.is_empty() || !dir.is_absolute() {
+                return Err("Pick an absolute folder path.".into());
+            }
+            tokio::fs::create_dir_all(&dir)
+                .await
+                .map_err(|e| format!("Can't create the folder: {e}"))?;
+            let probe = dir.join(".ytubic-write-test");
+            tokio::fs::write(&probe, b"ok")
+                .await
+                .map_err(|e| format!("Folder isn't writable: {e}"))?;
+            let _ = tokio::fs::remove_file(&probe).await;
+            store.set(CACHE_DIR_KEY, serde_json::Value::String(raw));
+        }
+    }
+    store.save().map_err(|e| format!("save settings store: {e}"))?;
+    Ok(())
+}
+
+/// Native directory picker for the cache-folder setting. Returns
+/// `None` when the user cancels. Blocking picker variant, so keep it
+/// off the async runtime's core threads.
+#[tauri::command]
+async fn pick_cache_folder(app: tauri::AppHandle) -> Option<String> {
+    use tauri_plugin_dialog::DialogExt;
+    tauri::async_runtime::spawn_blocking(move || {
+        app.dialog().file().blocking_pick_folder()
+    })
+    .await
+    .ok()
+    .flatten()
+    .and_then(|f| f.into_path().ok())
+    .map(|p| p.display().to_string())
 }
 
 #[derive(serde::Serialize)]
@@ -1139,10 +1317,7 @@ fn url_to_filename(url: &str) -> String {
 }
 
 fn cover_cache_dir(app: &tauri::AppHandle) -> PathBuf {
-    app.path()
-        .app_cache_dir()
-        .unwrap_or_else(|_| std::env::temp_dir())
-        .join("covers")
+    app.state::<ActiveCacheRoot>().0.join("covers")
 }
 
 /// Download a cover image (typically from iTunes / mzstatic) and stash
@@ -1923,7 +2098,14 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .manage(state)
+        .manage(CloseBehavior::default())
         .invoke_handler(tauri::generate_handler![
             ensure_ytdlp,
             resolve_stream_ytdlp,
@@ -1943,6 +2125,13 @@ pub fn run() {
             cover_cache_stats,
             clear_cover_cache,
             quit_app,
+            set_close_behavior,
+            autostart_set,
+            autostart_is_enabled,
+            notify_track,
+            get_cache_dir,
+            set_cache_dir,
+            pick_cache_folder,
             focus_main_window,
             open_player_window,
             close_player_window,
@@ -1950,12 +2139,22 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 match window.label() {
-                    // Close-to-tray: first close request hides the main
-                    // window instead of exiting. Real quit is via the
-                    // tray's Quit item.
+                    // Main window: hide to tray or quit, per the user's
+                    // Settings choice (default tray). Quit goes through
+                    // an explicit exit — just letting the close proceed
+                    // could leave a floating-player window keeping the
+                    // process alive headless.
                     "main" => {
-                        let _ = window.hide();
-                        api.prevent_close();
+                        let quit = window
+                            .state::<CloseBehavior>()
+                            .quit_on_close
+                            .load(Ordering::Relaxed);
+                        if quit {
+                            window.app_handle().exit(0);
+                        } else {
+                            let _ = window.hide();
+                            api.prevent_close();
+                        }
                     }
                     // The floating player window actually closes — we
                     // tell the main window so it can revert the layout
@@ -1970,10 +2169,14 @@ pub fn run() {
         .setup(move |app| {
             let port = port_handle.clone();
             let token = token_handle.clone();
-            let cache_root = app
-                .path()
-                .app_cache_dir()
-                .unwrap_or_else(|_| std::env::temp_dir());
+            // User-chosen cache root (Settings → Storage) or the OS
+            // default. Captured once and exposed as managed state so
+            // every cache-path computation matches the directories the
+            // stream server is about to bind — a preference change made
+            // later only applies after relaunch.
+            let cache_root = stored_cache_root(app.handle())
+                .unwrap_or_else(|| default_cache_root(app.handle()));
+            app.manage(ActiveCacheRoot(cache_root.clone()));
             let cache_dir = cache_root.join("stream");
             let ephemeral_dir = cache_root.join("stream-ephemeral");
             let cover_dir = cache_root.join("covers");

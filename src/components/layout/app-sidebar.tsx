@@ -48,6 +48,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { usePinned, usePinnedPlaylistsStore } from "@/lib/store/pinned-playlists";
+import { openSettings } from "@/lib/store/settings-dialog";
 import { fetchAccountInfo } from "@/lib/innertube/account";
 import { resetInnertube } from "@/lib/innertube/client";
 import { usePremiumStore } from "@/lib/store/premium";
@@ -187,11 +188,13 @@ export function AppSidebar() {
       <SidebarFooter>
         <SidebarMenu>
           <SidebarMenuItem>
-            <SidebarMenuButton asChild tooltip="Settings" className={MENU_BTN_CLS}>
-              <Link to="/settings">
-                <SettingsIcon />
-                <span>Settings</span>
-              </Link>
+            <SidebarMenuButton
+              tooltip="Settings"
+              className={MENU_BTN_CLS}
+              onClick={() => openSettings()}
+            >
+              <SettingsIcon />
+              <span>Settings</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
         </SidebarMenu>
