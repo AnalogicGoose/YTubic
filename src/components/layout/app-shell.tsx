@@ -14,6 +14,7 @@ import { EntityPageHeader } from "@/components/layout/entity-page-header";
 import { SettingsDialog } from "@/components/settings/settings-dialog";
 import { PremiumGateDialog } from "@/components/layout/premium-gate-dialog";
 import { ChannelPickerDialog } from "@/components/layout/channel-picker-dialog";
+import { WhatsNewDialog } from "@/components/layout/whats-new-dialog";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useAudioEngine } from "@/lib/audio-engine";
@@ -21,6 +22,7 @@ import { useCacheAutoClean } from "@/lib/cache-cleanup";
 import { usePlaybackNotifications } from "@/lib/playback-notifications";
 import { useYtdlpSetup } from "@/lib/ytdlp";
 import { useUpdateStartupCheck } from "@/lib/updater";
+import { useWhatsNewOnUpdate } from "@/lib/store/whats-new";
 import { pickHighResThumbnail } from "@/components/shared/thumbnail";
 import { usePlaybackStore, currentTrack } from "@/lib/store/playback";
 import { useLayoutStore } from "@/lib/store/layout";
@@ -78,6 +80,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   useAudioEngine();
   useYtdlpSetup();
   useUpdateStartupCheck();
+  useWhatsNewOnUpdate();
   usePremiumStatusSync();
   useLoginSuccessListener();
   useAccountsChangedListener();
@@ -234,6 +237,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           <SettingsDialog />
           <PremiumGateDialog />
           <ChannelPickerDialog />
+          <WhatsNewDialog />
         </div>
       </SidebarProvider>
       <Toaster />
