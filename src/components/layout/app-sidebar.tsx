@@ -217,6 +217,32 @@ const MANAGE_GOOGLE_URL = "https://myaccount.google.com/";
 const MANAGE_SUBSCRIPTION_URL =
   "https://music.youtube.com/paid_memberships";
 
+/**
+ * The logged-out footer CTA: a full-width primary (brand red) button.
+ * Collapses to a red icon button with a tooltip in icon mode. Runs the
+ * same `start_login` flow as "Add another account".
+ */
+function SidebarSignInButton() {
+  return (
+    <SidebarMenu>
+      <SidebarMenuItem>
+        <Button
+          title="Sign in"
+          onClick={() => {
+            invoke("start_login").catch((e) =>
+              toast.error(`Sign-in failed: ${String(e)}`),
+            );
+          }}
+          className="h-9 w-full gap-2 group-data-[collapsible=icon]:mx-auto group-data-[collapsible=icon]:size-8 group-data-[collapsible=icon]:p-0"
+        >
+          <LogInIcon />
+          <span className="group-data-[collapsible=icon]:hidden">Sign in</span>
+        </Button>
+      </SidebarMenuItem>
+    </SidebarMenu>
+  );
+}
+
 function UserProfile() {
   const loggedIn = useQuery({
     queryKey: ["auth-logged-in"],
@@ -233,36 +259,22 @@ function UserProfile() {
   const accounts = useAccounts();
   const premiumStatus = usePremiumStore((s) => s.status);
 
-  // Signed out: the profile slot becomes a prominent primary sign-in
-  // button so a new user always has an obvious way in (not a muted menu
-  // row that blends into Settings). Same `start_login` flow as "Add
-  // another account". `=== false` (not `!loggedIn.data`) keeps it hidden
-  // while the auth check is still loading, so a signed-in user never
-  // sees a flash of it before their profile lands.
-  if (loggedIn.data === false) {
-    return (
-      <SidebarMenu>
-        <SidebarMenuItem>
-          <Button
-            title="Sign in"
-            onClick={() => {
-              invoke("start_login").catch((e) =>
-                toast.error(`Sign-in failed: ${String(e)}`),
-              );
-            }}
-            className="h-9 w-full gap-2 group-data-[collapsible=icon]:mx-auto group-data-[collapsible=icon]:size-8 group-data-[collapsible=icon]:p-0"
-          >
-            <LogInIcon />
-            <span className="group-data-[collapsible=icon]:hidden">
-              Sign in
-            </span>
-          </Button>
-        </SidebarMenuItem>
-      </SidebarMenu>
-    );
-  }
+  // Auth check still resolving: render nothing to avoid a flash.
+  if (loggedIn.isLoading) return null;
 
-  if (!loggedIn.data || !account.data) return null;
+  // Not signed in -> the primary sign-in button. This is also the
+  // fallback when `is_logged_in` reports a session (a SAPISID cookie is
+  // present) but `/account_menu` never loads. That happens with an
+  // expired session left over from dev testing: `is_logged_in` only
+  // checks that the cookie exists, not that it still works, so without
+  // this branch the footer would show neither a profile nor a way back
+  // in. Better to always offer a fresh sign-in than to strand the user.
+  if (loggedIn.data !== true) return <SidebarSignInButton />;
+  if (!account.data) {
+    // Give a genuine first paint a moment before falling back.
+    if (account.isLoading) return null;
+    return <SidebarSignInButton />;
+  }
 
   const { name, email, photoUrl } = account.data;
   const initial = (name || email || "?").trim().charAt(0).toUpperCase();
