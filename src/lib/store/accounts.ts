@@ -68,7 +68,7 @@ export function useAccounts() {
  * dedup" bug.
  *
  * Soft refresh = drop the InnerTube client (so the backfill fetches
- * with the new jar) and invalidate the auth-related queries so the
+ * with the new jar) and refresh the auth-related queries so the
  * sidebar acknowledges the new row. The `accounts-changed` event
  * follows shortly after from `update_account_meta` and runs the
  * full reset.
@@ -81,9 +81,18 @@ export function useLoginSuccessListener(): void {
     void listen("login-success", () => {
       resetInnertube();
       void qc.invalidateQueries({ queryKey: ["accounts"] });
-      void qc.invalidateQueries({ queryKey: ["active-account-id"] });
       void qc.invalidateQueries({ queryKey: ["auth-logged-in"] });
-      void qc.invalidateQueries({ queryKey: ["account-info"] });
+      // RESET (not invalidate) the id + meta pair the backfill writes
+      // from. Invalidate keeps stale data around while refetching: the
+      // id query is a local invoke that lands in ~1ms with the NEW
+      // account id while `account-info` still holds the PREVIOUS
+      // account's meta, so the backfill effect would fire
+      // `update_account_meta(new id, old meta)`. Identity dedup then
+      // mislabels the fresh row as a duplicate of the old account and
+      // merges them, replacing the old account's cookies. Reset drops
+      // the data first, so the effect only ever sees a fresh pair.
+      void qc.resetQueries({ queryKey: ["active-account-id"] });
+      void qc.resetQueries({ queryKey: ["account-info"] });
       // A Google account can hold several YouTube channels, and the
       // library/likes belong to the channel rather than the account.
       // Right after a fresh sign-in is the moment to offer the choice,

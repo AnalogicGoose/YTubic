@@ -259,29 +259,42 @@ function UserProfile() {
   const accounts = useAccounts();
   const premiumStatus = usePremiumStore((s) => s.status);
 
+  const allAccounts = accounts.data ?? [];
+  const activeAccount = allAccounts.find((a) => a.isActive) ?? allAccounts[0];
+
   // Auth check still resolving: render nothing to avoid a flash.
   if (loggedIn.isLoading) return null;
 
-  // Not signed in -> the primary sign-in button. This is also the
-  // fallback when `is_logged_in` reports a session (a SAPISID cookie is
-  // present) but `/account_menu` never loads. That happens with an
-  // expired session left over from dev testing: `is_logged_in` only
-  // checks that the cookie exists, not that it still works, so without
-  // this branch the footer would show neither a profile nor a way back
-  // in. Better to always offer a fresh sign-in than to strand the user.
-  if (loggedIn.data !== true) return <SidebarSignInButton />;
+  // No live profile: signed out, or `is_logged_in` reports a session (a
+  // SAPISID cookie exists) whose `/account_menu` never loads (expired
+  // session). With one stored account or none, the primary sign-in
+  // button is the way back in; a re-login merges into the existing row
+  // via identity dedup, so no duplicate appears. With several stored
+  // accounts, collapsing to a sign-in button would strand the user away
+  // from the healthy ones (no way to switch or to sign the broken one
+  // out), so keep the menu and render it from the stored meta instead.
   if (!account.data) {
     // Give a genuine first paint a moment before falling back.
-    if (account.isLoading) return null;
-    return <SidebarSignInButton />;
+    if (loggedIn.data === true && account.isLoading) return null;
+    if (allAccounts.length < 2) return <SidebarSignInButton />;
   }
 
-  const { name, email, photoUrl } = account.data;
+  const live = account.data;
+  const name =
+    live?.name ||
+    activeAccount?.channelName ||
+    activeAccount?.name ||
+    activeAccount?.email ||
+    "Account";
+  const email = live?.email ?? activeAccount?.email ?? "";
+  const photoUrl =
+    live?.photoUrl ??
+    activeAccount?.channelPhotoUrl ??
+    activeAccount?.photoUrl ??
+    undefined;
   const initial = (name || email || "?").trim().charAt(0).toUpperCase();
   const isPremium = premiumStatus === "premium";
   const tierLabel = isPremium ? "Premium" : "Free";
-  const allAccounts = accounts.data ?? [];
-  const activeAccount = allAccounts.find((a) => a.isActive);
 
   const signOut = async () => {
     if (!activeAccount) {
@@ -343,7 +356,7 @@ function UserProfile() {
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <SidebarMenuButton
-              tooltip={email ? `${name} — ${email}` : name}
+              tooltip={email ? `${name} (${email})` : name}
               className={MENU_BTN_CLS}
             >
               <Avatar className="size-4 shrink-0">
@@ -353,18 +366,23 @@ function UserProfile() {
                 </AvatarFallback>
               </Avatar>
               <span className="truncate">{name}</span>
-              <Badge
-                variant="outline"
-                className={cn(
-                  "ms-auto h-4 px-1.5 text-[10px] font-semibold uppercase tracking-wide",
-                  "group-data-[collapsible=icon]:hidden",
-                  isPremium
-                    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
-                    : "text-muted-foreground",
-                )}
-              >
-                {tierLabel}
-              </Badge>
+              {/* The tier badge is a claim about the live session; with
+                  only stored meta (dead session fallback) it would say
+                  "Free" about an account we can't actually see. */}
+              {live ? (
+                <Badge
+                  variant="outline"
+                  className={cn(
+                    "ms-auto h-4 px-1.5 text-[10px] font-semibold uppercase tracking-wide",
+                    "group-data-[collapsible=icon]:hidden",
+                    isPremium
+                      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                      : "text-muted-foreground",
+                  )}
+                >
+                  {tierLabel}
+                </Badge>
+              ) : null}
             </SidebarMenuButton>
           </DropdownMenuTrigger>
           <DropdownMenuContent

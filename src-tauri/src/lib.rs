@@ -514,15 +514,19 @@ async fn dedup_accounts_by_identity(app: &tauri::AppHandle) {
         }
     }
 
-    for rid in remap.keys() {
-        let _ = tokio::fs::remove_dir_all(accounts_dir(app).join(rid)).await;
-    }
     idx.accounts.retain(|a| !remap.contains_key(&a.id));
 
+    // Persist the collapsed index BEFORE deleting the losers' jars. If
+    // the app dies in between, an orphan dir is invisible litter; the
+    // reverse order could leave the index pointing at deleted jars and
+    // boot the app signed out.
     let removed = remap.len();
     if let Err(e) = write_index(app, &idx).await {
         eprintln!("[accounts] dedup write index: {e}");
         return;
+    }
+    for rid in remap.keys() {
+        let _ = tokio::fs::remove_dir_all(accounts_dir(app).join(rid)).await;
     }
     eprintln!("[accounts] collapsed {removed} duplicate account row(s) by identity");
 }
@@ -1074,11 +1078,36 @@ async fn update_account_meta(
 ) -> Result<(), String> {
     let photo_url = photoUrl;
     let mut idx = read_index(&app).await;
+
+    // Meta from /account_menu always describes the ACTIVE account: the
+    // fetch runs with the active jar. A caller that pairs a stale id
+    // with fresh meta (or a fresh id with stale meta) must not relabel
+    // some other row; with identity dedup that could merge two real
+    // accounts. Drop the write and let the backfill re-run with a
+    // consistent pair.
+    if idx.active.as_deref() != Some(id.as_str()) {
+        return Ok(());
+    }
+
+    // When the account acts as a brand channel, /account_menu describes
+    // the channel, not the Google account, so its meta can't identify a
+    // duplicate row.
+    let acting_as_brand = idx
+        .accounts
+        .iter()
+        .find(|a| a.id == id)
+        .map(|a| a.page_id.is_some())
+        .unwrap_or(false);
+
     // Re-login of an existing account? Match a *different* row by
-    // identity (email, or avatar when the email is empty — see
+    // identity (email, or avatar when the email is empty; see
     // `meta_identity`). Keying on email alone missed brand-channel and
     // no-email accounts, which is how duplicate rows used to pile up.
-    let incoming = meta_identity(&email, photo_url.as_deref());
+    let incoming = if acting_as_brand {
+        None
+    } else {
+        meta_identity(&email, photo_url.as_deref())
+    };
     let dup_pos = incoming.as_ref().and_then(|key| {
         idx.accounts.iter().position(|a| {
             a.id != id
@@ -1125,26 +1154,49 @@ async fn update_account_meta(
         }
         if let Some(other) = idx.accounts.iter_mut().find(|a| a.id == other_id) {
             other.name = name;
-            // Don't let an empty backfill (brand channel / no email in
-            // /account_menu) wipe a good stored email.
+            // Don't let an empty backfill (some accounts' /account_menu
+            // carries no email) wipe a good stored email.
             if !email.is_empty() {
                 other.email = email;
             }
-            other.photo_url = photo_url;
+            // The avatar can be the dedup identity when the email is
+            // empty; never wipe it with a photo-less response.
+            if photo_url.is_some() {
+                other.photo_url = photo_url;
+            }
         }
         if idx.active.as_deref() != Some(other_id.as_str()) {
             active_changed = true;
         }
         idx.active = Some(other_id);
     } else if let Some(acct) = idx.accounts.iter_mut().find(|a| a.id == id) {
-        acct.name = name;
-        // A brand-channel identity's /account_menu carries no email;
-        // don't let that backfill wipe the stored one (it drives the
-        // re-login dedup above).
-        if !email.is_empty() {
-            acct.email = email;
+        if acting_as_brand {
+            // Route brand-channel meta into the channel fields and leave
+            // the account-level identity (name / email / photo captured
+            // on the personal channel) untouched: re-login dedup keys on
+            // it, and overwriting the account photo with the brand one
+            // made a later re-login of the same account look like a new
+            // identity.
+            if !name.is_empty() {
+                acct.channel_name = Some(name);
+            }
+            if photo_url.is_some() {
+                acct.channel_photo_url = photo_url;
+            }
+        } else {
+            acct.name = name;
+            // Some accounts' /account_menu carries no email; don't let
+            // that backfill wipe the stored one (it drives the re-login
+            // dedup above).
+            if !email.is_empty() {
+                acct.email = email;
+            }
+            // The avatar can be the dedup identity when the email is
+            // empty; never wipe it with a photo-less response.
+            if photo_url.is_some() {
+                acct.photo_url = photo_url;
+            }
         }
-        acct.photo_url = photo_url;
     } else {
         return Err(format!("no such account: {id}"));
     }
