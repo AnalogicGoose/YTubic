@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import { fetchRadio } from "@/lib/innertube/radio";
 import { prefetchStream, saveTrackMeta, streamUrlFor } from "@/lib/stream";
 import { usePlaybackStore, type QueueTrack } from "@/lib/store/playback";
@@ -14,7 +15,10 @@ import { pickThumbnail } from "@/components/shared/thumbnail";
 
 /**
  * AudioEngine binds the playback store to a singleton HTMLAudioElement
- * and to the browser MediaSession API (Windows SMTC / macOS Now Playing).
+ * and drives the OS media controls (Windows SMTC) from Rust via souvlaki (see
+ * the media effects below and src-tauri/src/media.rs) rather than the webview's
+ * own media session — that one runs in the WebView2 child process and shows up
+ * as "Unknown app" in the Windows Now Playing tile.
  *
  * Mount this hook once, near the root. It owns the <audio> element's lifecycle.
  */
@@ -76,6 +80,7 @@ export function useAudioEngine() {
       if (import.meta.env.DEV) {
         console.error("[audio] element error:", msg, "src=", el.currentSrc);
       }
+
       store().setStatus("error", msg);
 
       // Auto-advance: if the user wanted playback and we have a next
@@ -300,34 +305,11 @@ export function useAudioEngine() {
     }
   }, [pendingSeek]);
 
-  // MediaSession metadata (Windows SMTC + macOS Now Playing + keyboard media keys).
-  useEffect(() => {
-    if (typeof navigator === "undefined" || !navigator.mediaSession) return;
-
-    if (!track) {
-      navigator.mediaSession.metadata = null;
-      navigator.mediaSession.playbackState = "none";
-      return;
-    }
-
-    navigator.mediaSession.metadata = new MediaMetadata({
-      title: track.title,
-      artist: buildArtistLabel(track),
-      album: track.album ?? "",
-      artwork: track.thumbnails.length
-        ? [96, 192, 256, 512].map((size) => ({
-            src: pickThumbnail(track.thumbnails, size) ?? "",
-            sizes: `${size}x${size}`,
-            type: "image/jpeg",
-          }))
-        : [],
-    });
-  }, [track]);
-
-  useEffect(() => {
-    if (typeof navigator === "undefined" || !navigator.mediaSession) return;
-    navigator.mediaSession.playbackState = playing ? "playing" : "paused";
-  }, [playing]);
+  // OS media controls (Windows SMTC) are driven from Rust via souvlaki, not
+  // navigator.mediaSession — the webview's own media session shows up as
+  // "Unknown app" because it belongs to the WebView2 child process. Metadata /
+  // state is pushed by the media_update effect lower down; buttons come back
+  // via the media-control listener. See src-tauri/src/media.rs.
 
   // Tray menu commands come via a Tauri event. `cancelled` flag
   // protects against StrictMode's mount→unmount→mount race that
@@ -351,38 +333,43 @@ export function useAudioEngine() {
     };
   }, []);
 
-  // Action handlers once per mount.
+  // SMTC / media-key button presses arrive from Rust (souvlaki) as a
+  // `media-control` event. Drive the store the same way the old
+  // navigator.mediaSession action handlers did. `cancelled` guards against
+  // StrictMode's mount→unmount→mount double-listen, like the tray listener.
   useEffect(() => {
-    if (typeof navigator === "undefined" || !navigator.mediaSession) return;
-    const api = navigator.mediaSession;
-    const store = usePlaybackStore.getState;
-    api.setActionHandler("play", () => store().setPlaying(true));
-    api.setActionHandler("pause", () => store().setPlaying(false));
-    api.setActionHandler("previoustrack", () => store().prev());
-    api.setActionHandler("nexttrack", () => store().next());
-    api.setActionHandler("seekto", (details) => {
-      if (typeof details.seekTime === "number") store().seek(details.seekTime);
-    });
-    api.setActionHandler("seekbackward", (details) => {
-      const el = audioRef.current;
-      if (!el) return;
-      const offset = details.seekOffset ?? 10;
-      store().seek(Math.max(0, el.currentTime - offset));
-    });
-    api.setActionHandler("seekforward", (details) => {
-      const el = audioRef.current;
-      if (!el) return;
-      const offset = details.seekOffset ?? 10;
-      store().seek(el.currentTime + offset);
+    let cancelled = false;
+    let dispose: (() => void) | undefined;
+    void listen<{ action: string; position?: number }>("media-control", (e) => {
+      const store = usePlaybackStore.getState();
+      switch (e.payload.action) {
+        case "play":
+          store.setPlaying(true);
+          break;
+        case "pause":
+        case "stop":
+          store.setPlaying(false);
+          break;
+        case "toggle":
+          store.toggle();
+          break;
+        case "next":
+          store.next();
+          break;
+        case "previous":
+          store.prev();
+          break;
+        case "seek":
+          if (typeof e.payload.position === "number") store.seek(e.payload.position);
+          break;
+      }
+    }).then((un) => {
+      if (cancelled) un();
+      else dispose = un;
     });
     return () => {
-      api.setActionHandler("play", null);
-      api.setActionHandler("pause", null);
-      api.setActionHandler("previoustrack", null);
-      api.setActionHandler("nexttrack", null);
-      api.setActionHandler("seekto", null);
-      api.setActionHandler("seekbackward", null);
-      api.setActionHandler("seekforward", null);
+      cancelled = true;
+      dispose?.();
     };
   }, []);
 
@@ -455,27 +442,36 @@ export function useAudioEngine() {
       });
   }, [autoRadio, qIndex, qLen, seedVideoId]);
 
-  // Position state — lets the OS show an accurate progress bar.
+  // Push metadata + playback state to the OS media controls (Windows SMTC).
+  // Windows interpolates the scrubber between pushes while the state is
+  // Playing, so we don't push on every timeupdate — just on track / play-state
+  // / duration change, plus a light 2s refresh while playing to correct drift
+  // and reflect seeks. Live values are read imperatively so this OS sync never
+  // re-triggers the resolve / playback effects above.
   const duration = usePlaybackStore((s) => s.duration);
-  const position = usePlaybackStore((s) => s.position);
   useEffect(() => {
-    if (
-      typeof navigator === "undefined" ||
-      !navigator.mediaSession ||
-      typeof navigator.mediaSession.setPositionState !== "function"
-    )
-      return;
-    if (!Number.isFinite(duration) || duration <= 0) return;
-    try {
-      navigator.mediaSession.setPositionState({
-        duration,
-        position: Math.min(position, duration),
-        playbackRate: 1,
-      });
-    } catch {
-      /* older Chromium throws if position > duration for a frame — ignore */
-    }
-  }, [duration, position]);
+    const push = () => {
+      const s = usePlaybackStore.getState();
+      const t = s.index >= 0 ? s.queue[s.index] : undefined;
+      if (!t) {
+        void invoke("media_clear").catch(() => {});
+        return;
+      }
+      void invoke("media_update", {
+        title: t.title,
+        artist: buildArtistLabel(t),
+        album: t.album ?? "",
+        thumbnail: pickThumbnail(t.thumbnails, 512) ?? "",
+        duration: Number.isFinite(s.duration) ? s.duration : 0,
+        elapsed: s.position,
+        paused: !s.playing,
+      }).catch(() => {});
+    };
+    push();
+    if (!playing) return;
+    const id = window.setInterval(push, 2000);
+    return () => window.clearInterval(id);
+  }, [track, playing, duration]);
 }
 
 function buildArtistLabel(track: QueueTrack): string {

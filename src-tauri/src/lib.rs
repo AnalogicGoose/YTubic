@@ -24,6 +24,8 @@ use tower::ServiceExt;
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeFile;
 
+mod appid;
+mod media;
 mod ytdlp;
 
 fn sanitize_video_id(id: &str) -> bool {
@@ -2915,6 +2917,12 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Register + pin the app's Windows identity (AppUserModelID) so the SMTC
+    // media tile (and notifications, taskbar) resolve to "YTubic" + icon rather
+    // than "Unknown app". Must run before any window is created. No-op off
+    // Windows.
+    appid::init();
+
     let state = StreamServerState::default();
     let port_handle = state.port.clone();
     let token_handle = state.token.clone();
@@ -2991,6 +2999,8 @@ pub fn run() {
             focus_main_window,
             open_player_window,
             close_player_window,
+            media::media_update,
+            media::media_clear,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -3078,6 +3088,11 @@ pub fn run() {
                     tokio::time::sleep(Duration::from_secs(20 * 60)).await;
                 }
             });
+            // OS media controls (the Windows SMTC tile in Quick Settings / the
+            // volume flyout, plus the hardware media keys). setup() runs on the
+            // main thread, which souvlaki requires and where the main window's
+            // HWND is available.
+            media::init(app.handle());
             if let Err(e) = build_tray(app.handle()) {
                 eprintln!("[tray] build failed: {e}");
             }
