@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { Link, useRouterState } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
@@ -116,8 +116,11 @@ export function AppSidebar() {
         </span>
       </SidebarHeader>
 
-      <SidebarContent className="gap-0 overflow-x-hidden">
-        <SidebarGroup className="py-1">
+      {/* The content column itself doesn't scroll: Browse stays pinned
+          (shrink-0) and only the Playlists list scrolls, so the top nav
+          never slides out of view when the library is long. */}
+      <SidebarContent className="gap-0 overflow-hidden">
+        <SidebarGroup className="shrink-0 py-1">
           <SidebarGroupLabel>Browse</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
@@ -250,10 +253,60 @@ function SidebarPlaylists({
     return [...pinnedRows, ...restRows];
   }, [library.data, pinned, hidden]);
 
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Ramp a soft top/bottom fade on the list from its scroll position so
+  // rows dissolve into transparency at each edge instead of being cut by
+  // a hard line. An edge with nothing beyond it — the top at rest, the
+  // bottom when fully scrolled, or a list too short to scroll — stays
+  // crisp. Vertical mirror of the carousels' `shelf-edge-fade`.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const FADE_RAMP = 16;
+    const clamp = (v: number) => Math.max(0, Math.min(1, v));
+    const update = () => {
+      const distTop = el.scrollTop;
+      const distBottom = el.scrollHeight - el.clientHeight - el.scrollTop;
+      el.style.setProperty("--fade-t", clamp(1 - distTop / FADE_RAMP).toFixed(3));
+      el.style.setProperty(
+        "--fade-b",
+        clamp(1 - distBottom / FADE_RAMP).toFixed(3),
+      );
+    };
+    update();
+    el.addEventListener("scroll", update, { passive: true });
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    // Rows load async and grow the scroll height without resizing the
+    // container, so watch the inner list too.
+    const inner = el.firstElementChild;
+    if (inner) ro.observe(inner);
+    return () => {
+      el.removeEventListener("scroll", update);
+      ro.disconnect();
+    };
+  }, []);
+
+  // `pe-0` drops the group's right padding so the scroll box reaches the
+  // panel edge. `sidebar-list-scroll` (index.css) reserves a stable 8px
+  // scrollbar gutter there, so the rows keep a constant right inset
+  // (aligned with Browse) whether or not a scrollbar shows, and the
+  // scrollbar — when it shows — sits flush at the border. Collapsed
+  // restores `pe-2` for a symmetric, centered rail.
   return (
-    <SidebarGroup className="py-1">
+    <SidebarGroup className="flex min-h-0 flex-1 flex-col py-1 pe-0 group-data-[collapsible=icon]:pe-2">
       <SidebarGroupLabel>Playlists</SidebarGroupLabel>
-      <SidebarGroupContent>
+      {/* The scroll lives here, not on SidebarContent, so the label above
+          stays put and only the playlist rows move. `app-scroll` is the
+          same thin scrollbar the main content and carousels use. */}
+      {/* `sidebar-list-scroll` (see index.css) nudges the scrollbar
+          toward the panel's right edge when expanded, and hides it while
+          keeping the icons centered when the rail is collapsed. */}
+      <SidebarGroupContent
+        ref={scrollRef}
+        className="sidebar-list-fade sidebar-list-scroll app-scroll min-h-0 flex-1 overflow-y-auto overflow-x-hidden"
+      >
         <SidebarMenu>
           <SidebarMenuItem>
             <SidebarMenuButton
