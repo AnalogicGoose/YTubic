@@ -1,14 +1,14 @@
-# План будущих фич
+# Future features plan
 
-Дата: 2026-07-06.
+Date: 2026-07-06.
 
-- [x] API-интеграции (Discord Rich Presence, Last.fm)
+- [x] API integrations (Discord Rich Presence, Last.fm)
 - [ ] Crossfade
-- [ ] Queue/playlist view вместо lyrics
-- [ ] Windows controls для музыки (SMTC)
-- [ ] Linux версия
-- [ ] macOS версия
-- [x] Возможность выбрать разные каналы/субпрофили для одного аккаунта
+- [ ] Queue/playlist view instead of lyrics
+- [ ] Windows media controls (SMTC)
+- [ ] Linux version
+- [ ] macOS version
+- [x] Ability to pick different channels/sub-profiles for a single account
 - [ ] Auto Mix
-- [ ] Фиксы для светлой темы
-- [ ] Возможность добавлять и проигрывать локальные песни пользователя
+- [ ] Light-theme fixes
+- [ ] Ability to add and play the user's local songs
