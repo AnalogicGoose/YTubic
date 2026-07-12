@@ -504,7 +504,7 @@ export function useAudioEngine() {
         const cur = s.index >= 0 ? s.queue[s.index]?.videoId : undefined;
         if (cur !== seedVideoId || s.index < s.queue.length - 1) return;
         const rest = tracks.filter((t) => t.id !== seedVideoId);
-        if (rest.length) s.appendToQueue(rest);
+        if (rest.length) s.appendToQueue(rest, "autoplay");
       })
       .catch(() => {
         // Allow a retry on transient failure.

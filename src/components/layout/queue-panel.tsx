@@ -23,6 +23,7 @@ import {
 import { AnimatedTabs } from "@/components/ui/animated-tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Thumbnail } from "@/components/shared/thumbnail";
+import { ArtistLinks } from "@/components/shared/artist-links";
 import { usePlaybackStore, currentTrack } from "@/lib/store/playback";
 import { cn } from "@/lib/utils";
 
@@ -195,62 +196,79 @@ function QueueTabBody({
 }) {
   if (!active && upcoming.length === 0) {
     return (
-      <p className="mt-4 px-2 text-sm text-muted-foreground">
-        Queue is empty.
-      </p>
+      <p className="mt-4 px-2 text-sm text-muted-foreground">Queue is empty.</p>
     );
   }
+
+  const upcomingEntries = upcoming.map((track, i) => ({
+    track,
+    queueIdx: index + 1 + i,
+  }));
+  const playlistEntries = upcomingEntries.filter(
+    ({ track }) => track.source !== "autoplay",
+  );
+  const recommendedEntries = upcomingEntries.filter(
+    ({ track }) => track.source === "autoplay",
+  );
+
+  const renderRows = (entries: typeof upcomingEntries) =>
+    entries.map(({ track: t, queueIdx }) => (
+      <QueueRow
+        key={`u-${t.videoId}-${queueIdx}`}
+        track={t}
+        onActivate={() => onGoTo(queueIdx)}
+        onRemove={() => onRemoveAt(queueIdx)}
+        draggable
+        isDragging={dragFrom === queueIdx}
+        isDropTarget={dragOver === queueIdx && dragFrom !== queueIdx}
+        onDragStart={() => setDragFrom(queueIdx)}
+        onDragOver={() => {
+          if (dragFrom === null) return;
+          setDragOver(queueIdx);
+        }}
+        onDrop={() => {
+          if (dragFrom !== null && dragFrom !== queueIdx) {
+            const to = dragFrom < queueIdx ? queueIdx - 1 : queueIdx;
+            onMoveTrack(dragFrom, to);
+          }
+          setDragFrom(null);
+          setDragOver(null);
+        }}
+        onDragEnd={() => {
+          setDragFrom(null);
+          setDragOver(null);
+        }}
+      />
+    ));
 
   return (
     <>
       {active && (
         <QueueSection label="Now playing">
-          <QueueRow track={active} active playing={playing} onActivate={onToggle} />
+          <QueueRow
+            track={active}
+            active
+            playing={playing}
+            onActivate={onToggle}
+          />
         </QueueSection>
       )}
 
       {upcoming.length > 0 ? (
         <>
           {active && <div className="h-4" aria-hidden="true" />}
-          <QueueSection label="Up next">
-            {upcoming.map((t, i) => {
-              const queueIdx = index + 1 + i;
-              return (
-                <QueueRow
-                  key={`u-${t.videoId}-${i}`}
-                  track={t}
-                  onActivate={() => onGoTo(queueIdx)}
-                  onRemove={() => onRemoveAt(queueIdx)}
-                  draggable
-                  isDragging={dragFrom === queueIdx}
-                  isDropTarget={dragOver === queueIdx && dragFrom !== queueIdx}
-                  onDragStart={() => setDragFrom(queueIdx)}
-                  onDragOver={() => {
-                    if (dragFrom === null) return;
-                    setDragOver(queueIdx);
-                  }}
-                  onDrop={() => {
-                    if (dragFrom !== null && dragFrom !== queueIdx) {
-                      // The drop indicator sits above the hovered row
-                      // ("insert before it"). For a downward move, splicing
-                      // the dragged item out first shifts the target down by
-                      // one, so subtract one to land before the row, not
-                      // after it (upward drags are already correct).
-                      const to =
-                        dragFrom < queueIdx ? queueIdx - 1 : queueIdx;
-                      onMoveTrack(dragFrom, to);
-                    }
-                    setDragFrom(null);
-                    setDragOver(null);
-                  }}
-                  onDragEnd={() => {
-                    setDragFrom(null);
-                    setDragOver(null);
-                  }}
-                />
-              );
-            })}
-          </QueueSection>
+          {playlistEntries.length > 0 && (
+            <QueueSection label="Playlist">
+              {renderRows(playlistEntries)}
+            </QueueSection>
+          )}
+          {recommendedEntries.length > 0 && (
+            <div className="mt-4 border-t border-hairline pt-3">
+              <QueueSection label="Recommended by YouTube" muted>
+                {renderRows(recommendedEntries)}
+              </QueueSection>
+            </div>
+          )}
         </>
       ) : active ? (
         <p className="mt-4 px-2 text-sm text-muted-foreground">
@@ -272,9 +290,7 @@ function HistoryTabBody({
 }) {
   if (history.length === 0) {
     return (
-      <p className="mt-4 px-2 text-sm text-muted-foreground">
-        No history yet.
-      </p>
+      <p className="mt-4 px-2 text-sm text-muted-foreground">No history yet.</p>
     );
   }
   return (
@@ -396,7 +412,7 @@ function QueueRow({
     title: string;
     subtitle?: string;
     thumbnails: any[];
-    artists?: { name: string }[];
+    artists?: { id?: string; name: string }[];
     duration?: number;
   };
   active?: boolean;
@@ -515,15 +531,16 @@ function QueueRow({
 
       <div className="flex min-w-0 flex-col text-left">
         <span
-          className={cn(
-            "truncate text-sm font-medium",
-            active && "text-brand",
-          )}
+          className={cn("truncate text-sm font-medium", active && "text-brand")}
         >
           {track.title}
         </span>
-        <span className="truncate text-xs text-muted-foreground">
-          {subtitle}
+        <span onClick={(e) => e.stopPropagation()}>
+          <ArtistLinks
+            artists={track.artists}
+            fallback={subtitle}
+            className="block truncate text-xs text-muted-foreground"
+          />
         </span>
       </div>
 

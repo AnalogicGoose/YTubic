@@ -13,6 +13,8 @@ export type QueueTrack = {
   thumbnails: Thumbnail[];
   /** Original duration from browse responses, may be undefined until /player resolves. */
   duration?: number;
+  /** Whether this entry was chosen by the user or appended by autoplay. */
+  source?: "user" | "autoplay";
 };
 
 export type RepeatMode = "off" | "all" | "one";
@@ -53,7 +55,10 @@ export type PlaybackState = {
   playShelfItems: (items: ShelfItem[], startIndex: number) => void;
   enqueueNext: (track: QueueTrack | ShelfItem) => void;
   enqueueEnd: (track: QueueTrack | ShelfItem) => void;
-  appendToQueue: (tracks: (QueueTrack | ShelfItem)[]) => void;
+  appendToQueue: (
+    tracks: (QueueTrack | ShelfItem)[],
+    source?: QueueTrack["source"],
+  ) => void;
   removeAt: (index: number) => void;
   moveTrack: (from: number, to: number) => void;
   clearQueue: () => void;
@@ -151,6 +156,7 @@ const playbackStateCreator: StateCreator<PlaybackState> = (set, get) => ({
     let queue = extras?.length
       ? [mapped, ...extras.filter((t) => t.videoId !== mapped.videoId)]
       : [mapped];
+    queue = queue.map((t) => ({ ...t, source: "user" }));
     // Honour an active shuffle for the trailing tracks (current stays first).
     if (get().shuffle && queue.length > 1) {
       queue = [queue[0], ...fisherYates(queue.slice(1))];
@@ -172,9 +178,9 @@ const playbackStateCreator: StateCreator<PlaybackState> = (set, get) => ({
     const i = Math.max(0, Math.min(startIndex, tracks.length - 1));
     // Honour an active shuffle: keep the chosen track current and shuffle
     // the upcoming portion, matching setShuffle's semantics.
-    let queue = tracks;
+    let queue = tracks.map((t) => ({ ...t, source: t.source ?? "user" }));
     if (get().shuffle) {
-      queue = [...tracks.slice(0, i + 1), ...fisherYates(tracks.slice(i + 1))];
+      queue = [...queue.slice(0, i + 1), ...fisherYates(queue.slice(i + 1))];
     }
     set({
       queue,
@@ -196,15 +202,17 @@ const playbackStateCreator: StateCreator<PlaybackState> = (set, get) => ({
     }
     if (tracks.length === 0) return;
     // If the user clicked a non-playable item, find the nearest playable one.
-    const playableOffset = items
-      .slice(0, startIndex + 1)
-      .filter((i) => i.kind === "song" || i.kind === "video").length - 1;
+    const playableOffset =
+      items
+        .slice(0, startIndex + 1)
+        .filter((i) => i.kind === "song" || i.kind === "video").length - 1;
     get().setQueue(tracks, Math.max(0, playableOffset));
   },
 
   enqueueNext: (track) => {
     const mapped = shelfItemToTrack(track);
     if (!mapped) return;
+    mapped.source = "user";
     set((s) => {
       const next = [...s.queue];
       const insertAt = s.index < 0 ? 0 : s.index + 1;
@@ -216,14 +224,14 @@ const playbackStateCreator: StateCreator<PlaybackState> = (set, get) => ({
   enqueueEnd: (track) => {
     const mapped = shelfItemToTrack(track);
     if (!mapped) return;
-    set((s) => ({ queue: [...s.queue, mapped] }));
+    set((s) => ({ queue: [...s.queue, { ...mapped, source: "user" }] }));
   },
 
-  appendToQueue: (tracks) => {
+  appendToQueue: (tracks, source = "user") => {
     const mapped: QueueTrack[] = [];
     for (const t of tracks) {
       const m = shelfItemToTrack(t);
-      if (m) mapped.push(m);
+      if (m) mapped.push({ ...m, source });
     }
     if (!mapped.length) return;
     set((s) => ({ queue: [...s.queue, ...mapped] }));
@@ -520,9 +528,17 @@ export function initFloatingPlaybackBridge(): void {
     // mutated only the floater's mirror store — nothing actually played and
     // the queue silently diverged until the next broadcast overwrote it.
     playNow: (track, extras) =>
-      sendAction({ type: "playNow", track: track as unknown, extras: extras as unknown }),
+      sendAction({
+        type: "playNow",
+        track: track as unknown,
+        extras: extras as unknown,
+      }),
     playShelfItems: (items, startIndex) =>
-      sendAction({ type: "playShelfItems", items: items as unknown[], startIndex }),
+      sendAction({
+        type: "playShelfItems",
+        items: items as unknown[],
+        startIndex,
+      }),
     enqueueNext: (track) =>
       sendAction({ type: "enqueueNext", track: track as unknown }),
     enqueueEnd: (track) =>

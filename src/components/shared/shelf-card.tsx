@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import {
   PinIcon,
   PinOffIcon,
@@ -48,6 +48,7 @@ import {
   usePinnedPlaylistsStore,
 } from "@/lib/store/pinned-playlists";
 import type { ShelfItem } from "@/lib/innertube/types";
+import { ArtistLinks } from "@/components/shared/artist-links";
 
 type Props = {
   item: ShelfItem;
@@ -127,6 +128,7 @@ const CARD_CLASS =
   "group flex w-full flex-col gap-2 rounded-lg p-2 text-left transition-colors hover:bg-accent/60 focus-visible:bg-accent focus-visible:outline-none";
 
 export function ShelfCard({ item, className }: Props) {
+  const navigate = useNavigate();
   const subtitle =
     item.subtitle ??
     item.artists?.map((a) => a.name).join(", ") ??
@@ -137,8 +139,7 @@ export function ShelfCard({ item, className }: Props) {
   // Albums and playlists get a slightly softer corner than the
   // default rounded-md (6px) — 8px / rounded-lg reads as "physical
   // record sleeve" vs the tighter rounding on songs/videos.
-  const isAlbumOrPlaylist =
-    item.kind === "album" || item.kind === "playlist";
+  const isAlbumOrPlaylist = item.kind === "album" || item.kind === "playlist";
   const radiusClass = item.round
     ? "rounded-full"
     : isAlbumOrPlaylist
@@ -220,7 +221,13 @@ export function ShelfCard({ item, className }: Props) {
               item.round && "text-center",
             )}
           >
-            {subtitle}
+            {item.artists?.length ? (
+              <span onClick={(e) => e.stopPropagation()}>
+                <ArtistLinks artists={item.artists} fallback={subtitle} />
+              </span>
+            ) : (
+              subtitle
+            )}
           </span>
         ) : null}
       </div>
@@ -281,13 +288,21 @@ export function ShelfCard({ item, className }: Props) {
 
   if (item.kind === "album") {
     return (
-      <Link
-        to="/album/$id"
-        params={{ id: item.id }}
+      <div
+        role="link"
+        tabIndex={0}
         className={cn(CARD_CLASS, className)}
+        onClick={() =>
+          void navigate({ to: "/album/$id", params: { id: item.id } })
+        }
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            void navigate({ to: "/album/$id", params: { id: item.id } });
+          }
+        }}
       >
         {body}
-      </Link>
+      </div>
     );
   }
 
@@ -328,13 +343,20 @@ export function ShelfCard({ item, className }: Props) {
   // song / video — clicking plays the track. Right-click → context menu.
   return (
     <TrackContextMenu item={item}>
-      <button
-        type="button"
+      <div
+        role="button"
+        tabIndex={0}
         className={cn(CARD_CLASS, className)}
         onClick={() => usePlaybackStore.getState().playNow(item)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            usePlaybackStore.getState().playNow(item);
+          }
+        }}
       >
         {body}
-      </button>
+      </div>
     </TrackContextMenu>
   );
 }
@@ -368,8 +390,7 @@ function PlaylistPinContextMenu({
               pin({
                 id: item.id,
                 title: item.title,
-                thumbnailUrl:
-                  item.thumbnails[item.thumbnails.length - 1]?.url,
+                thumbnailUrl: item.thumbnails[item.thumbnails.length - 1]?.url,
               })
             }
           >

@@ -107,3 +107,27 @@ describe("playback next()", () => {
     expect(usePlaybackStore.getState().index).toBe(-1);
   });
 });
+
+describe("queue source labels", () => {
+  beforeEach(() => setup({}));
+
+  it("marks an explicit queue as user-selected", () => {
+    usePlaybackStore.getState().setQueue([track("a"), track("b")]);
+    expect(usePlaybackStore.getState().queue.map((t) => t.source)).toEqual([
+      "user",
+      "user",
+    ]);
+  });
+
+  it("keeps autoplay additions distinguishable from the playlist", () => {
+    usePlaybackStore.getState().setQueue([track("a")]);
+    usePlaybackStore
+      .getState()
+      .appendToQueue([track("b"), track("c")], "autoplay");
+    expect(usePlaybackStore.getState().queue.map((t) => t.source)).toEqual([
+      "user",
+      "autoplay",
+      "autoplay",
+    ]);
+  });
+});
