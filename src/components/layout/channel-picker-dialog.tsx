@@ -11,10 +11,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import {
-  fetchChannelList,
-  type ChannelChoice,
-} from "@/lib/innertube/channels";
+import { fetchChannelList, type ChannelChoice } from "@/lib/innertube/channels";
 import { useAccounts } from "@/lib/store/accounts";
 import { useChannelPickerDialog } from "@/lib/store/channel-picker";
 import { cn } from "@/lib/utils";
@@ -73,8 +70,8 @@ export function ChannelPickerDialog() {
           <DialogTitle>Choose a channel</DialogTitle>
           <DialogDescription>
             Your Google account can hold several YouTube channels. Library,
-            likes and recommendations belong to the channel, not the
-            account, so pick the one YTubic should use.
+            likes and recommendations belong to the channel, not the account, so
+            pick the one Goosic should use.
           </DialogDescription>
         </DialogHeader>
 

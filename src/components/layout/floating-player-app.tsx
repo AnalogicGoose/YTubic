@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { ThemeProvider } from "next-themes";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -6,17 +6,12 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { PinIcon } from "lucide-react";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
+import { PLAYER_GLASS_SURFACE_CLASS } from "@/components/ui/glass-surface";
 import { PlayerBar } from "@/components/layout/player-bar";
 import { FloatingPlayerSyncReceiver } from "@/components/layout/floating-player-sync";
-import { pickHighResThumbnail } from "@/components/shared/thumbnail";
-import {
-  usePlaybackStore,
-  currentTrack,
-  initFloatingPlaybackBridge,
-} from "@/lib/store/playback";
-import {
-  initFloatingTrackSourceBridge,
-} from "@/lib/store/track-source";
+import { NowPlayingBackground } from "@/components/layout/now-playing-background";
+import { initFloatingPlaybackBridge } from "@/lib/store/playback";
+import { initFloatingTrackSourceBridge } from "@/lib/store/track-source";
 import { useLayoutStore } from "@/lib/store/layout";
 import { useSettingsStore } from "@/lib/store/settings";
 import { cn } from "@/lib/utils";
@@ -57,8 +52,13 @@ export default function FloatingPlayerApp() {
           mirrors live playback via events, so it needs no cold-start cache. */}
       <QueryClientProvider client={queryClient}>
         <TooltipProvider delayDuration={800} skipDelayDuration={0}>
-          <div className="relative flex h-screen w-screen flex-col overflow-hidden bg-background">
-            {background === "ambient" && <FloatingBackgroundCover />}
+          <div
+            className={cn(
+              PLAYER_GLASS_SURFACE_CLASS,
+              "relative flex h-screen w-screen flex-col overflow-hidden rounded-[34px] border",
+            )}
+          >
+            {background === "ambient" && <NowPlayingBackground />}
             <FloatingPlayerSyncReceiver />
             <FloatingTitleBar />
             <main className="relative flex-1">
@@ -103,7 +103,7 @@ function FloatingTitleBar() {
     // the body dims it via `bg-surface`, leaving a visible seam.
     <header
       data-tauri-drag-region
-      className="relative z-30 flex h-(--titlebar-h) shrink-0 select-none items-center justify-end bg-surface"
+      className="relative z-30 flex h-(--titlebar-h) shrink-0 select-none items-center justify-end bg-transparent"
     >
       <button
         type="button"
@@ -137,68 +137,5 @@ function FloatingTitleBar() {
         </svg>
       </button>
     </header>
-  );
-}
-
-/**
- * Same crossfade-blur cover as the main window's `BackgroundCover`,
- * scoped to the floating window so the standalone card doesn't sit
- * on a flat background. Duplicated here (rather than imported) to
- * keep `app-shell.tsx` from leaking into the floating bundle path.
- */
-function FloatingBackgroundCover() {
-  const track = usePlaybackStore(currentTrack);
-  const url =
-    track?.thumbnails && track.thumbnails.length > 0
-      ? pickHighResThumbnail(track.thumbnails)
-      : null;
-
-  const [slotA, setSlotA] = useState<string | null>(null);
-  const [slotB, setSlotB] = useState<string | null>(null);
-  const [active, setActive] = useState<"A" | "B">("A");
-
-  useEffect(() => {
-    if (!url) return;
-    const currentSlot = active === "A" ? slotA : slotB;
-    if (url === currentSlot) return;
-    if (active === "A") {
-      setSlotB(url);
-      setActive("B");
-    } else {
-      setSlotA(url);
-      setActive("A");
-    }
-  }, [url, active, slotA, slotB]);
-
-  const baseClass =
-    "pointer-events-none absolute inset-0 h-full w-full scale-125 object-cover blur-3xl saturate-150 transition-opacity duration-700 ease-out";
-
-  return (
-    <>
-      {slotA && (
-        <img
-          src={slotA}
-          alt=""
-          aria-hidden
-          className={baseClass}
-          style={{ opacity: active === "A" ? 0.3 : 0 }}
-        />
-      )}
-      {slotB && (
-        <img
-          src={slotB}
-          alt=""
-          aria-hidden
-          className={baseClass}
-          style={{ opacity: active === "B" ? 0.3 : 0 }}
-        />
-      )}
-      {(slotA || slotB) && (
-        <div
-          aria-hidden
-          className="bg-cover-noise pointer-events-none absolute inset-0"
-        />
-      )}
-    </>
   );
 }

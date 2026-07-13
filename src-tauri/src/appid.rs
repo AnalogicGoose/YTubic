@@ -5,7 +5,8 @@
 //! media session's AUMID and matching it against a Start Menu shortcut that
 //! carries the same AUMID. Tauri's NSIS installer stamps that AUMID — the
 //! bundle identifier — onto the shortcuts it creates, so an installed build
-//! resolves to "YTubic" + icon for free.
+//! resolves to "Goosic" + icon for free. The legacy bundle identifier is kept
+//! so existing installs continue updating in place.
 //!
 //! But a media session only carries our AUMID if the *process* has one. A
 //! launch that doesn't go through a shortcut (autostart's Run entry, a direct

@@ -73,6 +73,7 @@ import {
   type AccountSummary,
 } from "@/lib/store/accounts";
 import { cn } from "@/lib/utils";
+import { APP_ICON, APP_NAME } from "@/lib/branding";
 
 const NAV_ITEMS = [
   { to: "/", label: "Home", icon: HomeIcon },
@@ -105,9 +106,9 @@ export function AppSidebar() {
          *  up with menu icons (which are at group-p-2 + button-p-2 =
          *  16px). In collapsed mode the row centers it like the
          *  centered menu icons below. */}
-        <img src="/ytubic-icon.svg" alt="YTubic" className="size-7 shrink-0" />
+        <img src={APP_ICON} alt={APP_NAME} className="size-7 shrink-0" />
         <span className="text-xl font-semibold leading-none tracking-tight transition-opacity duration-200 group-data-[collapsible=icon]:hidden">
-          YTubic
+          {APP_NAME}
         </span>
       </SidebarHeader>
 

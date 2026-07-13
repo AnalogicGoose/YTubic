@@ -125,7 +125,7 @@ function pickCategoryIcon(title: string): LucideIcon {
 }
 
 const CARD_CLASS =
-  "group flex w-full flex-col gap-2 rounded-lg p-2 text-left transition-colors hover:bg-accent/60 focus-visible:bg-accent focus-visible:outline-none";
+  "group flex w-full flex-col gap-2 rounded-lg p-3 text-left transition-colors hover:bg-accent/60 focus-visible:bg-accent focus-visible:outline-none";
 
 export function ShelfCard({ item, className }: Props) {
   const navigate = useNavigate();

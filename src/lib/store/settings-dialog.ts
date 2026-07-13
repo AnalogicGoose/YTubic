@@ -1,10 +1,7 @@
 import { create } from "zustand";
 
 export type SettingsTab =
-  | "general"
-  | "appearance"
-  | "storage"
-  | "integrations";
+  "general" | "appearance" | "experiments" | "storage" | "integrations";
 
 type State = {
   open: boolean;

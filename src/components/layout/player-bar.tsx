@@ -33,6 +33,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { Slider } from "@/components/ui/slider";
+import { PLAYER_GLASS_SURFACE_CLASS } from "@/components/ui/glass-surface";
 import { Thumbnail } from "@/components/shared/thumbnail";
 import { LikeDislikeButtons } from "@/components/shared/like-buttons";
 import { ArtistLinks } from "@/components/shared/artist-links";
@@ -359,7 +360,7 @@ export function VolumeControl({
         )}
       >
         {direction === "vertical" ? (
-          <div className="flex w-12 flex-col items-center gap-2 rounded-md border border-hairline bg-surface-active/70 px-4 py-3 shadow backdrop-blur-md">
+          <div className="flex w-12 flex-col items-center gap-2 rounded-md border border-hairline bg-popover px-4 py-3 text-popover-foreground shadow-lg">
             <span className="text-xs font-medium tabular-nums text-foreground">
               {pct}
             </span>
@@ -456,8 +457,8 @@ export function PlayerBar({
   // window's own layout.
   const wrapperClass =
     variant === "right"
-      ? "fixed bottom-2 right-2 top-(--titlebar-h) z-10 flex w-[22rem] flex-col rounded-[34px] border border-sidebar-border bg-surface"
-      : "absolute inset-0 flex flex-col bg-surface";
+      ? "fixed bottom-2 right-2 top-(--titlebar-h) z-10 flex w-[22rem] flex-col rounded-[34px] border"
+      : "absolute inset-0 flex flex-col bg-transparent";
 
   return (
     // shadcn's SidebarProvider injects a nested TooltipProvider with
@@ -470,7 +471,12 @@ export function PlayerBar({
     // 300ms, which makes the next tooltip pop up instantly — annoying
     // when the buttons are densely packed).
     <TooltipProvider delayDuration={800} skipDelayDuration={0}>
-      <aside className={wrapperClass}>
+      <aside
+        className={cn(
+          variant === "right" && PLAYER_GLASS_SURFACE_CLASS,
+          wrapperClass,
+        )}
+      >
         {/* Queue overlay vs. cover-and-lyrics body. AnimatePresence
           crossfades the two when the user toggles the queue button.
           Both branches fill the card above the bottom action row

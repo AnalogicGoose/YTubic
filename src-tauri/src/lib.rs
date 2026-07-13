@@ -1008,7 +1008,7 @@ async fn ensure_session_keeper(
     // webview still loads and keeps the session alive regardless of
     // visibility or position.
     let win = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(url))
-        .title("YTubic session keeper")
+        .title("Goosic session keeper")
         .visible(false)
         .decorations(false)
         .focused(false)
@@ -1281,7 +1281,7 @@ async fn open_player_window(
         "player",
         WebviewUrl::App("index.html?floating-player=1".into()),
     )
-    .title("YTubic — player")
+    .title("Goosic — player")
     .decorations(false)
     .inner_size(360.0, 720.0)
     .min_inner_size(320.0, 560.0)
@@ -2948,7 +2948,7 @@ fn runtime_icon(app: &tauri::AppHandle) -> tauri::image::Image<'static> {
 }
 
 fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
-    let show_item = MenuItem::with_id(app, "show", "Show YTubic", true, None::<&str>)?;
+    let show_item = MenuItem::with_id(app, "show", "Show Goosic", true, None::<&str>)?;
     let play_item = MenuItem::with_id(app, "play_pause", "Play / Pause", true, Some("Space"))?;
     let prev_item = MenuItem::with_id(app, "prev", "Previous", true, None::<&str>)?;
     let next_item = MenuItem::with_id(app, "next", "Next", true, None::<&str>)?;
@@ -2965,9 +2965,9 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let _tray = TrayIconBuilder::with_id("main-tray")
         .icon(runtime_icon(app))
         .tooltip(if cfg!(debug_assertions) {
-            "YTubic (dev)"
+            "Goosic (dev)"
         } else {
-            "YTubic"
+            "Goosic"
         })
         .menu(&menu)
         .show_menu_on_left_click(false)
@@ -3005,7 +3005,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Register + pin the app's Windows identity (AppUserModelID) so the SMTC
-    // media tile (and notifications, taskbar) resolve to "YTubic" + icon rather
+    // media tile (and notifications, taskbar) resolve to "Goosic" + icon rather
     // than "Unknown app". Must run before any window is created. No-op off
     // Windows.
     appid::init();

@@ -9,7 +9,7 @@
 // "Unknown app" with no icon. There is no supported API to re-attribute a
 // WebView2 media session to the host app (WebView2Feedback #2236, open since
 // 2022). Creating the SMTC ourselves, bound to the host process's main window,
-// makes Windows resolve the tile to YTubic's own executable identity (name +
+// makes Windows resolve the tile to Goosic's own executable identity (name +
 // icon). Chromium's competing "Unknown app" tile is suppressed by disabling its
 // media session via `--disable-features=...MediaSessionService` on the main
 // window (see `additionalBrowserArgs` in tauri.conf.json).
@@ -51,7 +51,7 @@ pub fn init(app: &AppHandle) {
 
     let config = PlatformConfig {
         dbus_name: "ytubic",
-        display_name: "YTubic",
+        display_name: "Goosic",
         hwnd,
     };
 

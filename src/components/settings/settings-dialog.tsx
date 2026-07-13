@@ -1,5 +1,6 @@
 import {
   DatabaseIcon,
+  FlaskConicalIcon,
   PaletteIcon,
   PlugIcon,
   Settings2Icon,
@@ -17,6 +18,7 @@ import { GeneralTab } from "@/components/settings/general-tab";
 import { AppearanceTab } from "@/components/settings/appearance-tab";
 import { StorageTab } from "@/components/settings/storage-tab";
 import { IntegrationsTab } from "@/components/settings/integrations-tab";
+import { ExperimentsTab } from "@/components/settings/experiments-tab";
 import {
   useSettingsDialog,
   type SettingsTab,
@@ -26,6 +28,7 @@ import { cn } from "@/lib/utils";
 const TABS: { id: SettingsTab; label: string; icon: LucideIcon }[] = [
   { id: "general", label: "General", icon: Settings2Icon },
   { id: "appearance", label: "Appearance", icon: PaletteIcon },
+  { id: "experiments", label: "Experiments", icon: FlaskConicalIcon },
   { id: "storage", label: "Storage", icon: DatabaseIcon },
   { id: "integrations", label: "Integrations", icon: PlugIcon },
 ];
@@ -131,6 +134,7 @@ export function SettingsDialog() {
           <div className="app-scroll min-w-0 flex-1 overflow-y-auto px-5 pb-5 [overflow-anchor:none]">
             {tab === "general" && <GeneralTab />}
             {tab === "appearance" && <AppearanceTab />}
+            {tab === "experiments" && <ExperimentsTab />}
             {tab === "storage" && <StorageTab />}
             {tab === "integrations" && <IntegrationsTab />}
           </div>

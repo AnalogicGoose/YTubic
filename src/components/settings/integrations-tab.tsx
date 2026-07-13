@@ -297,7 +297,7 @@ function LastfmSection() {
 }
 
 /**
- * Integrations tab: third-party services YTubic can broadcast to.
+ * Integrations tab: third-party services Goosic can broadcast to.
  * Discord Rich Presence and Last.fm scrobbling both react to the same
  * now-playing state, mirrored out over their own backends.
  */
@@ -313,7 +313,7 @@ export function IntegrationsTab() {
         <SettingRow
           icon={DiscordIcon}
           title="Discord Rich Presence"
-          description="Show the current track on your Discord profile while it plays."
+          description="Show the current track as Goosic on your Discord profile while it plays."
           control={
             <Switch
               checked={discordRichPresence}

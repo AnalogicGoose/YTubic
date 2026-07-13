@@ -209,7 +209,8 @@ function TimedLyrics({ lines }: { lines: TimedLine[] }) {
     }
     const cRect = container.getBoundingClientRect();
     const eRect = el.getBoundingClientRect();
-    const elTopWithinContent = eRect.top - cRect.top + container.scrollTop;
+    const elTopWithinContent =
+      eRect.top - cRect.top + container.scrollTop;
     const target =
       idx === 0
         ? 0
@@ -232,8 +233,7 @@ function TimedLyrics({ lines }: { lines: TimedLine[] }) {
     // visible. getBoundingClientRect avoids depending on offsetParent.
     const cRect = container.getBoundingClientRect();
     const eRect = el.getBoundingClientRect();
-    const elTopWithinContent =
-      eRect.top - cRect.top + container.scrollTop;
+    const elTopWithinContent = eRect.top - cRect.top + container.scrollTop;
     // The very first line is treated as a special case: we pin it to
     // the top of the viewport instead of the usual ~36% position. For
     // any later line, the active-line-above-center rule applies.
@@ -273,7 +273,7 @@ function TimedLyrics({ lines }: { lines: TimedLine[] }) {
       <div
         ref={scrollRef}
         className={cn(
-          "lyrics-no-scrollbar flex h-full flex-col gap-1 overflow-y-auto px-1 pt-0 pb-16",
+          "lyrics-no-scrollbar flex h-full flex-col gap-1 overflow-y-auto pt-0 pr-7 pb-20 pl-2",
           // Mask kicks in only after the karaoke has moved past the
           // first line — that way the first line stays crisp at the
           // top of the column while the song hasn't started or is on

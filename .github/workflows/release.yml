@@ -43,7 +43,7 @@ jobs:
           YTUBIC_LASTFM_API_SECRET: ${{ secrets.YTUBIC_LASTFM_API_SECRET }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: "YTubic ${{ github.ref_name }}"
+          releaseName: "Goosic ${{ github.ref_name }}"
           releaseBody: "See the assets below to download and install this version."
           releaseDraft: false
           prerelease: false

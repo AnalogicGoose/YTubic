@@ -64,7 +64,7 @@ export function PremiumGateDialog() {
             {checking
               ? "Checking your YouTube Music subscription…"
               : signedOut
-                ? "YTubic plays music through your YouTube Music account. Sign in with an account that has an active Music Premium subscription."
+                ? "Goosic plays music through your YouTube Music account. Sign in with an account that has an active Music Premium subscription."
                 : "Your account doesn't have an active Music Premium subscription, which YouTube requires for ad-free playback."}
           </DialogDescription>
         </DialogHeader>
@@ -75,15 +75,13 @@ export function PremiumGateDialog() {
               <InfoIcon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
               <p className="text-xs leading-relaxed text-muted-foreground">
                 Free YouTube Music is supported by ads. YouTube's Terms of
-                Service require those ads to play, and YTubic has no way to
-                show them, so YouTube limits ad-free playback to Premium
-                accounts.{" "}
+                Service require those ads to play, and Goosic has no way to show
+                them, so YouTube limits ad-free playback to Premium accounts.{" "}
                 <span className="font-medium text-foreground">
-                  YTubic itself stays completely free and open source, and
+                  Goosic itself stays completely free and open source, and
                   always will be.
                 </span>{" "}
-                You can keep listening for free, with ads, at
-                music.youtube.com.
+                You can keep listening for free, with ads, at music.youtube.com.
               </p>
             </div>
             <div className="flex justify-end gap-2">
@@ -93,9 +91,7 @@ export function PremiumGateDialog() {
               {signedOut ? (
                 <Button
                   onClick={() => {
-                    invoke("start_login").catch((e) =>
-                      toast.error(String(e)),
-                    );
+                    invoke("start_login").catch((e) => toast.error(String(e)));
                   }}
                 >
                   Sign in

@@ -18,11 +18,14 @@ type State = {
   /** Window backdrop: "ambient" tints with blurred album art,
    *  "plain" keeps the flat theme background. */
   background: BackgroundMode;
+  /** Experimental animated mesh derived from the current cover. When false,
+   *  Ambient mode uses the original blurred-cover implementation. */
+  dynamicAlbumMesh: boolean;
   /** System toast on track change while the app is in the background
    *  (see `lib/playback-notifications.ts`). */
   playbackNotifications: boolean;
   /** Broadcast the current track to Discord as a Rich Presence status
-   *  ("Listening to YTubic"). Off by default — opt-in for privacy.
+   *  ("Listening to Goosic"). Off by default — opt-in for privacy.
    *  The IPC worker lives in `src-tauri/src/discord.rs`. */
   discordRichPresence: boolean;
   /** Scrobble every played track to the connected Last.fm account. Only
@@ -47,6 +50,7 @@ type State = {
   setCacheAutoClean: (v: CacheAutoCleanPeriod) => void;
   markCacheCleaned: () => void;
   setBackground: (v: BackgroundMode) => void;
+  setDynamicAlbumMesh: (v: boolean) => void;
   setPlaybackNotifications: (v: boolean) => void;
   setDiscordRichPresence: (v: boolean) => void;
   setLastfmEnabled: (v: boolean) => void;
@@ -71,6 +75,7 @@ export const useSettingsStore = create<State>()(
       cacheAutoClean: "off",
       lastCacheCleanAt: 0,
       background: "ambient",
+      dynamicAlbumMesh: true,
       playbackNotifications: false,
       discordRichPresence: false,
       lastfmEnabled: false,
@@ -82,6 +87,7 @@ export const useSettingsStore = create<State>()(
       setCacheAutoClean: (cacheAutoClean) => set({ cacheAutoClean }),
       markCacheCleaned: () => set({ lastCacheCleanAt: Date.now() }),
       setBackground: (background) => set({ background }),
+      setDynamicAlbumMesh: (dynamicAlbumMesh) => set({ dynamicAlbumMesh }),
       setPlaybackNotifications: (playbackNotifications) =>
         set({ playbackNotifications }),
       setDiscordRichPresence: (discordRichPresence) =>

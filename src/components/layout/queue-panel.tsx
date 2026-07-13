@@ -74,7 +74,7 @@ export function QueueBody({ onClose }: { onClose?: () => void }) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <header className="flex shrink-0 items-center justify-between gap-2 border-b border-hairline px-3 py-1">
+      <header className="flex shrink-0 items-center justify-between gap-2 px-3 py-1">
         {/* The tabs already provide a built-in underline; override its
             own border-b so it doesn't double up with the header's
             bottom hairline. The header padding is also reduced
@@ -137,8 +137,8 @@ export function QueueBody({ onClose }: { onClose?: () => void }) {
         </div>
       </header>
 
-      <ScrollArea className="min-h-0 flex-1">
-        <div className="flex flex-col p-2">
+      <ScrollArea className="min-h-0 flex-1 [&_[data-slot=scroll-area-scrollbar]]:inset-y-4 [&_[data-slot=scroll-area-scrollbar]]:h-auto">
+        <div className="flex flex-col px-2 pt-2 pb-6">
           {tab === "queue" ? (
             <QueueTabBody
               active={active}
@@ -263,7 +263,7 @@ function QueueTabBody({
             </QueueSection>
           )}
           {recommendedEntries.length > 0 && (
-            <div className="mt-4 border-t border-hairline pt-3">
+            <div className="mt-4 pt-3">
               <QueueSection label="Recommended by YouTube" muted>
                 {renderRows(recommendedEntries)}
               </QueueSection>

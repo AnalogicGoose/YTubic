@@ -92,16 +92,12 @@ function AccountGroup() {
             Not signed in
           </span>
           <span className="text-[13px] text-muted-foreground">
-            Sign in to unlock your library, liked songs, and
-            Premium-quality streams. Cookies stay on this machine.
+            Sign in to unlock your library, liked songs, and Premium-quality
+            streams. Cookies stay on this machine.
           </span>
         </div>
         <Button size="sm" onClick={signIn} disabled={signingIn}>
-          {signingIn ? (
-            <Loader2Icon className="animate-spin" />
-          ) : (
-            <LogInIcon />
-          )}
+          {signingIn ? <Loader2Icon className="animate-spin" /> : <LogInIcon />}
           Sign in with Google
         </Button>
       </div>
@@ -149,7 +145,7 @@ function BehaviorGroup() {
       <SettingRow
         icon={RocketIcon}
         title="Launch at startup"
-        description="Start YTubic automatically when you log in."
+        description="Start Goosic automatically when you log in."
         control={
           <Switch
             checked={!!autostart.data}
@@ -174,7 +170,7 @@ function BehaviorGroup() {
       <SettingRow
         icon={XIcon}
         title="Close to tray"
-        description="Hide YTubic to the tray when you press ✕ instead of quitting."
+        description="Hide Goosic to the tray when you press ✕ instead of quitting."
         control={
           <Switch
             checked={closeAction === "tray"}

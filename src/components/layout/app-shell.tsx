@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { useLocation, useNavigate } from "@tanstack/react-router";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -11,6 +11,7 @@ import { PlayerBarBottom } from "@/components/layout/player-bar-bottom";
 import { FloatingPlayerSync } from "@/components/layout/floating-player-sync";
 import { DragSnapOverlay } from "@/components/layout/drag-snap-overlay";
 import { EntityPageHeader } from "@/components/layout/entity-page-header";
+import { NowPlayingBackground } from "@/components/layout/now-playing-background";
 import { SettingsDialog } from "@/components/settings/settings-dialog";
 import { PremiumGateDialog } from "@/components/layout/premium-gate-dialog";
 import { ChannelPickerDialog } from "@/components/layout/channel-picker-dialog";
@@ -24,8 +25,7 @@ import { useLastfmScrobbler } from "@/lib/lastfm-scrobbler";
 import { useYtdlpSetup } from "@/lib/ytdlp";
 import { useUpdateStartupCheck } from "@/lib/updater";
 import { useWhatsNewOnUpdate } from "@/lib/store/whats-new";
-import { pickHighResThumbnail } from "@/components/shared/thumbnail";
-import { usePlaybackStore, currentTrack } from "@/lib/store/playback";
+import { usePlaybackStore } from "@/lib/store/playback";
 import { useLayoutStore } from "@/lib/store/layout";
 import { usePremiumStatusSync } from "@/lib/store/premium";
 import {
@@ -103,7 +103,9 @@ export function AppShell({ children }: { children: ReactNode }) {
   // covers the "Nothing playing" empty state at first launch and
   // after the queue is cleared. The mode itself stays the same; the
   // player just reappears in the chosen slot once a track is loaded.
-  const hasTrack = usePlaybackStore((s) => s.index >= 0 && s.index < s.queue.length);
+  const hasTrack = usePlaybackStore(
+    (s) => s.index >= 0 && s.index < s.queue.length,
+  );
   // Set when we close the floating window programmatically (queue emptied)
   // so the player-window-closed handler doesn't mistake it for the user
   // clicking X and revert the persisted floating layout preference.
@@ -200,7 +202,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         }
       >
         <div className="relative flex h-screen w-screen flex-col overflow-hidden bg-background">
-          {background === "ambient" && <BackgroundCover />}
+          {background === "ambient" && <NowPlayingBackground />}
           {/* Custom title bar spans the full window width so the
               Windows-style min/max/close buttons land in the actual
               top-right corner, not behind the floating player. */}
@@ -231,7 +233,12 @@ export function AppShell({ children }: { children: ReactNode }) {
                   (our horizontal carousels would never clip). */}
               <main
                 ref={mainRef}
-                className="app-scroll min-h-0 flex-1 overflow-y-auto overflow-x-hidden"
+                className={cn(
+                  "app-scroll min-h-0 flex-1 overflow-y-auto overflow-x-hidden",
+                  // The bottom player floats above this scroller. Keep enough
+                  // trailing space for the final row to clear the overlay.
+                  mode === "bottom" && hasTrack && "pb-[7.5rem]",
+                )}
               >
                 {children}
               </main>
@@ -249,72 +256,5 @@ export function AppShell({ children }: { children: ReactNode }) {
       </SidebarProvider>
       <Toaster />
     </TooltipProvider>
-  );
-}
-
-/**
- * Stretched, heavily-blurred copy of the current track's cover. Sits
- * between the solid `bg-background` and the rest of the UI so the
- * window picks up a subtle tint of whatever is playing.
- *
- * Two layered <img>s crossfade between tracks: a new URL goes into
- * whichever slot is currently inactive, then we flip `active`, and
- * the CSS opacity transition fades the old slot out while the new
- * slot fades in.
- */
-function BackgroundCover() {
-  const track = usePlaybackStore(currentTrack);
-  const url =
-    track?.thumbnails && track.thumbnails.length > 0
-      ? pickHighResThumbnail(track.thumbnails)
-      : null;
-
-  const [slotA, setSlotA] = useState<string | null>(null);
-  const [slotB, setSlotB] = useState<string | null>(null);
-  const [active, setActive] = useState<"A" | "B">("A");
-
-  useEffect(() => {
-    if (!url) return;
-    const currentSlot = active === "A" ? slotA : slotB;
-    if (url === currentSlot) return;
-    if (active === "A") {
-      setSlotB(url);
-      setActive("B");
-    } else {
-      setSlotA(url);
-      setActive("A");
-    }
-  }, [url, active, slotA, slotB]);
-
-  const baseClass =
-    "pointer-events-none absolute inset-0 h-full w-full scale-125 object-cover blur-3xl saturate-150 transition-opacity duration-700 ease-out";
-
-  return (
-    <>
-      {slotA && (
-        <img
-          src={slotA}
-          alt=""
-          aria-hidden
-          className={baseClass}
-          style={{ opacity: active === "A" ? 0.3 : 0 }}
-        />
-      )}
-      {slotB && (
-        <img
-          src={slotB}
-          alt=""
-          aria-hidden
-          className={baseClass}
-          style={{ opacity: active === "B" ? 0.3 : 0 }}
-        />
-      )}
-      {(slotA || slotB) && (
-        <div
-          aria-hidden
-          className="bg-cover-noise pointer-events-none absolute inset-0"
-        />
-      )}
-    </>
   );
 }

@@ -7,6 +7,7 @@ import {
 } from "@/components/ui/dialog";
 import { useWhatsNewStore } from "@/lib/store/whats-new";
 import { whatsNewFor } from "@/lib/whats-new";
+import { APP_ICON } from "@/lib/branding";
 
 /**
  * The post-update What's New screen: a hero banner, the title and
@@ -40,7 +41,7 @@ export function WhatsNewDialog() {
             ) : (
               <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-primary/25 via-primary/10 to-background">
                 <img
-                  src="/ytubic-icon.svg"
+                  src={APP_ICON}
                   alt=""
                   className="size-16 opacity-90 drop-shadow-md"
                 />
@@ -58,7 +59,7 @@ export function WhatsNewDialog() {
               </span>
             </div>
             <DialogDescription className="sr-only">
-              Release notes for YTubic version {entry.version}
+              Release notes for Goosic version {entry.version}
             </DialogDescription>
           </div>
 

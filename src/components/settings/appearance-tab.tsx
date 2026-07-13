@@ -1,16 +1,9 @@
 import { useTheme } from "next-themes";
-import {
-  LayoutDashboardIcon,
-  PaletteIcon,
-  WallpaperIcon,
-} from "lucide-react";
+import { LayoutDashboardIcon, PaletteIcon, WallpaperIcon } from "lucide-react";
 import { SegmentedControl } from "@/components/ui/segmented";
 import { Group, SettingRow, TabPane } from "@/components/settings/primitives";
 import { useLayoutStore, type LayoutMode } from "@/lib/store/layout";
-import {
-  useSettingsStore,
-  type BackgroundMode,
-} from "@/lib/store/settings";
+import { useSettingsStore, type BackgroundMode } from "@/lib/store/settings";
 
 const THEME_OPTIONS = [
   { value: "light", label: "Light" },
@@ -69,7 +62,7 @@ export function AppearanceTab() {
         <SettingRow
           icon={WallpaperIcon}
           title="Background"
-          description="Tint the window with the current album art, or keep it plain."
+          description="Use visuals from the current album art, or keep the window plain."
           control={
             <SegmentedControl
               value={background}

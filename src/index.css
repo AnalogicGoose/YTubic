@@ -194,6 +194,24 @@
   .app-scroll::-webkit-scrollbar-thumb:hover {
     background: var(--muted-foreground);
   }
+
+  /* Menu lists reuse the app scrollbar, but keep its track away from the
+     strongly rounded top and bottom edges of the glass panel. */
+  .menu-scroll::-webkit-scrollbar-track {
+    margin-block: 20px;
+  }
+
+  .menu-scroll::-webkit-scrollbar-thumb {
+    border-inline: 1px solid transparent;
+    background-clip: padding-box;
+  }
+
+  /* Chromium paints a scroll container's own scrollbar after border-radius
+     clipping. An explicit rounded clip masks both rows and thumbs so nothing
+     can leak through a 34px menu/popover corner. */
+  .menu-shell-clip {
+    clip-path: inset(0 round 34px);
+  }
 }
 
 @layer utilities {
@@ -308,6 +326,93 @@
     transform: translateZ(0);
     will-change: scale;
     backface-visibility: hidden;
+  }
+
+  /* Apple Music-style color mosaic: the cover's sampled colors are distributed
+     through a moving 6x6 grid, then fused into a fluid field by the frost layer. */
+  .album-mesh-layer {
+    transform: translateZ(0);
+    isolation: isolate;
+  }
+
+  .album-mesh-grid {
+    position: absolute;
+    inset: -30%;
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    grid-template-rows: repeat(6, minmax(0, 1fr));
+    /* Blur the color source itself. Packaged WebView2 builds can exclude
+       sibling compositor layers from a nested backdrop-filter, which exposed
+       the raw mosaic as large squares. A direct filter is deterministic in
+       both development and release builds. */
+    filter: blur(clamp(110px, 9vw, 160px)) saturate(108%);
+    transform: translate3d(-2%, -1%, 0) scale(1.12) rotate(-1deg);
+    animation: album-mesh-grid-drift 28s ease-in-out -8s infinite alternate;
+    will-change: transform, filter;
+    backface-visibility: hidden;
+  }
+
+  .album-mesh-cell {
+    min-width: 0;
+    min-height: 0;
+    background: var(--mesh-color);
+    transform: translate3d(-3%, -2%, 0) scale(1.18);
+    animation: album-mesh-cell-breathe var(--mesh-duration) ease-in-out
+      var(--mesh-delay) infinite alternate;
+    will-change: transform, opacity;
+    backface-visibility: hidden;
+  }
+
+  .album-mesh-cell:nth-child(3n + 2) {
+    animation-direction: alternate-reverse;
+  }
+
+  .album-mesh-cell:nth-child(4n) {
+    transform: translate3d(3%, -3%, 0) scale(1.2);
+  }
+
+  .album-mesh-frost {
+    position: absolute;
+    inset: -2px;
+    background: rgb(255 255 255 / 8%);
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+    transform: translateZ(0);
+  }
+
+  .dark .album-mesh-frost {
+    background: rgb(0 0 0 / 18%);
+  }
+
+  @keyframes album-mesh-grid-drift {
+    0% {
+      transform: translate3d(-3%, -2%, 0) scale(1.12) rotate(-1.5deg);
+    }
+    50% {
+      transform: translate3d(2%, 3%, 0) scale(1.17) rotate(1deg);
+    }
+    100% {
+      transform: translate3d(4%, -1%, 0) scale(1.13) rotate(2deg);
+    }
+  }
+
+  @keyframes album-mesh-cell-breathe {
+    0% {
+      opacity: 0.88;
+      transform: translate3d(-4%, -3%, 0) scale(1.16);
+    }
+    100% {
+      opacity: 1;
+      transform: translate3d(4%, 3%, 0) scale(1.24);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .album-mesh-grid,
+    .album-mesh-cell {
+      animation: none !important;
+      will-change: auto;
+    }
   }
 
   /* Fine SVG noise overlaid on the heavily-blurred `BackgroundCover` art.

@@ -11,6 +11,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { checkForUpdates } from "@/lib/updater";
 import { openWhatsNew } from "@/lib/store/whats-new";
+import { APP_ICON, APP_NAME } from "@/lib/branding";
 
 const REPO_URL = "https://github.com/AnalogicGoose/YTubic";
 const KOFI_URL = "https://ko-fi.com/nuberr";
@@ -54,9 +55,9 @@ export function AboutDialog({
       <DialogContent className="max-w-md">
         <DialogHeader>
           <div className="flex items-center gap-3">
-            <img src="/ytubic-icon.svg" alt="" className="size-12" />
+            <img src={APP_ICON} alt="" className="size-12" />
             <div className="flex flex-col items-start">
-              <DialogTitle className="text-lg">YTubic</DialogTitle>
+              <DialogTitle className="text-lg">{APP_NAME}</DialogTitle>
               <DialogDescription>
                 {version ? `Version ${version}` : " "}
               </DialogDescription>

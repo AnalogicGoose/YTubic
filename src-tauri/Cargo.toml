@@ -1,7 +1,7 @@
 [package]
-name = "ytubic"
-version = "0.3.3"
-description = "YTubic — fast, responsive YouTube Music desktop client"
+name = "goosic"
+version = "0.3.6"
+description = "Goosic — fast, responsive YouTube Music desktop client"
 authors = ["George Shyshov"]
 license = "GPL-3.0-only"
 edition = "2021"
@@ -12,7 +12,7 @@ edition = "2021"
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
-name = "ytubic_lib"
+name = "goosic_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -58,14 +58,14 @@ tauri-plugin-notification = "2"
 # OS media controls: on Windows this is the System Media Transport Controls
 # (the media tile in Quick Settings / the volume flyout, the lock screen, and
 # the hardware media keys). We create the SMTC ourselves from the host process
-# so the tile resolves to YTubic's own identity — the webview's built-in media
+# so the tile resolves to Goosic's own identity — the webview's built-in media
 # session can't, because it belongs to the msedgewebview2.exe child process and
 # shows up as "Unknown app". See src/media.rs.
 souvlaki = "0.7"
 # Discord Rich Presence: talks to the local Discord client over its IPC
 # socket / named pipe (no native deps beyond that). Off by default; opt-in
-# from Settings. See src/discord.rs. Set YTUBIC_DISCORD_APP_ID at build time
-# (or edit APP_ID) to the Application ID of a Discord app named "YTubic".
+# from Settings. See src/discord.rs. Set GOOSIC_DISCORD_APP_ID at build time
+# (or edit APP_ID) to the Application ID of a Discord app named "Goosic".
 discord-rich-presence = "0.2"
 # MD5 for Last.fm request signing (api_sig = md5 of sorted params + secret).
 # Tiny, single-purpose crate. See src/lastfm.rs.
@@ -77,7 +77,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_Security_Cryptography",
     # SetCurrentProcessExplicitAppUserModelID — pins our AppUserModelID onto the
     # process so the SMTC media tile resolves (via the installer's matching Start
-    # Menu shortcut) to "YTubic" instead of "Unknown app". See src/appid.rs.
+    # Menu shortcut) to "Goosic" instead of "Unknown app". See src/appid.rs.
     "Win32_UI_Shell",
 ] }
 

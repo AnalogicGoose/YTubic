@@ -41,6 +41,7 @@ import {
   useITunesCover,
 } from "@/components/layout/player-bar";
 import { PlayerMoreMenu } from "@/components/layout/player-more-menu";
+import { PLAYER_GLASS_SURFACE_CLASS } from "@/components/ui/glass-surface";
 import { cn } from "@/lib/utils";
 import { usePlayerCoverDrag } from "@/lib/player-drag";
 import { usePlaybackStore, currentTrack } from "@/lib/store/playback";
@@ -118,7 +119,12 @@ export function PlayerBarBottom() {
     // adjacent triggers (Radix's 300ms default makes the next one
     // pop up instantly otherwise).
     <TooltipProvider delayDuration={800} skipDelayDuration={0}>
-      <aside className="relative z-10 mr-2 mb-2 flex shrink-0 flex-col gap-2 rounded-[34px] border border-sidebar-border bg-surface px-4 py-3 shadow-sm">
+      <aside
+        className={cn(
+          PLAYER_GLASS_SURFACE_CLASS,
+          "absolute inset-x-0 bottom-0 z-30 mr-2 mb-2 flex flex-col gap-2 rounded-[34px] border px-4 py-3",
+        )}
+      >
         {status === "error" && error ? (
           <div className="absolute -top-9 left-3 right-3 truncate rounded-md bg-destructive/90 px-3 py-1 text-xs text-destructive-foreground shadow">
             Playback error: {error}
@@ -310,11 +316,11 @@ function LyricsPopover({ state }: { state: ReturnType<typeof useLyricsView> }) {
         sideOffset={12}
         className="flex h-[28rem] w-[24rem] flex-col gap-2 p-0"
       >
-        <header className="flex shrink-0 items-center justify-between border-b border-hairline px-3 py-2">
+        <header className="flex shrink-0 items-center justify-between px-4 pt-3 pb-1">
           <span className="text-sm font-medium">Lyrics</span>
           <LyricsSourceButton state={state} />
         </header>
-        <div className="min-h-0 flex-1 overflow-hidden px-2 pb-3">
+        <div className="min-h-0 flex-1 overflow-hidden px-4 pb-6">
           <LyricsBody state={state} />
         </div>
       </PopoverContent>

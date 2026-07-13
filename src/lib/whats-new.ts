@@ -38,6 +38,21 @@ export type WhatsNewEntry = {
  */
 export const WHATS_NEW: WhatsNewEntry[] = [
   {
+    version: "0.3.4",
+    date: "July 2026",
+    image: "/whats-new/0.3.0.svg",
+    sections: [
+      {
+        heading: "Autoplay controls",
+        items: [
+          "Toggle YouTube radio autoplay directly from either player layout.",
+          "Control the default autoplay behavior from General settings.",
+          "Repeat and queue behavior now take priority over autoplay at the end of playback.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.3.3",
     date: "July 2026",
     image: "/whats-new/0.3.0.svg",
@@ -52,7 +67,7 @@ export const WHATS_NEW: WhatsNewEntry[] = [
       },
       {
         heading: "Automatic updates",
-        body: "Future releases can now be downloaded and verified automatically from AnalogicGoose/YTubic.",
+        body: "Future Goosic releases can now be downloaded and verified automatically from GitHub.",
       },
     ],
   },
@@ -94,7 +109,7 @@ export const WHATS_NEW: WhatsNewEntry[] = [
         heading: "Last.fm scrobbling",
         items: [
           "Connect your Last.fm account to scrobble every track you play.",
-          "Liking a song on YTubic loves it on Last.fm, and unliking removes it.",
+          "Liking a song on Goosic loves it on Last.fm, and unliking removes it.",
           "Scrobbles made while offline are queued and sent once you're back online.",
         ],
       },
@@ -126,7 +141,7 @@ export const WHATS_NEW: WhatsNewEntry[] = [
       {
         heading: "Fixes",
         items: [
-          'Fixed the Windows Now Playing tile showing "Unknown app" instead of YTubic\'s name and icon.',
+          'Fixed the Windows Now Playing tile showing "Unknown app" instead of Goosic\'s name and icon.',
           "Fixed a bug where some songs wouldn't load, or wouldn't load on the first try.",
         ],
       },
@@ -171,7 +186,7 @@ export const WHATS_NEW: WhatsNewEntry[] = [
       },
       {
         heading: "A note from the developer",
-        body: "I really didn't want to lock playback behind anything, but YouTube's Terms of Service require ads to play and YTubic has no way to show them. To keep the project alive without breaking those terms, playback and caching now need an active YouTube Music Premium subscription. Browsing and search stay open to everyone, and YTubic itself stays completely free and open source. Thanks for understanding.",
+        body: "I really didn't want to lock playback behind anything, but YouTube's Terms of Service require ads to play and Goosic has no way to show them. To keep the project alive without breaking those terms, playback and caching now need an active YouTube Music Premium subscription. Browsing and search stay open to everyone, and Goosic itself stays completely free and open source. Thanks for understanding.",
       },
     ],
   },

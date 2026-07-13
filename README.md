@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="assets/branding/ytubic-icon.svg" alt="YTubic" width="96" />
+  <img src="public/goosic-icon.svg" alt="Goosic" width="96" />
 </p>
 
-<h1 align="center">YTubic</h1>
+<h1 align="center">Goosic</h1>
 
 <p align="center">
   A fast, responsive YouTube Music desktop client for Windows.
@@ -18,9 +18,9 @@
   </a>
 </p>
 
-Built as a reaction to the sluggish webview-wrapper experience — YTubic talks to YouTube's InnerTube API directly, renders its own UI, and caches aggressively, so navigation and playback feel instant.
+Built as a reaction to the sluggish webview-wrapper experience — Goosic talks to YouTube's InnerTube API directly, renders its own UI, and caches aggressively, so navigation and playback feel instant.
 
-![YTubic — artist page with the player and synced lyrics](assets/screenshots/artist-page.jpg)
+![Goosic — artist page with the player and synced lyrics](assets/screenshots/artist-page.jpg)
 
 ## Features
 
@@ -33,7 +33,7 @@ Built as a reaction to the sluggish webview-wrapper experience — YTubic talks 
 - **Windows integration** — media keys, System Media Transport Controls, tray icon, single instance
 - **Auto-updates** — the app updates itself from GitHub Releases, and keeps its yt-dlp copy fresh automatically
 
-> **Disclaimer:** YTubic is an unofficial client. It is not affiliated with,
+> **Disclaimer:** Goosic is an unofficial client. It is not affiliated with,
 > endorsed by, or sponsored by Google or YouTube. "YouTube" and "YouTube Music"
 > are trademarks of Google LLC. The app streams audio through
 > [yt-dlp](https://github.com/yt-dlp/yt-dlp) and may stop working at any time if

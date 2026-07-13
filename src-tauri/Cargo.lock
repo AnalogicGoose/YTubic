@@ -1647,6 +1647,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "goosic"
+version = "0.3.6"
+dependencies = [
+ "axum",
+ "cookie",
+ "discord-rich-presence",
+ "md5",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "souvlaki",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-autostart",
+ "tauri-plugin-dialog",
+ "tauri-plugin-http",
+ "tauri-plugin-notification",
+ "tauri-plugin-opener",
+ "tauri-plugin-process",
+ "tauri-plugin-shell",
+ "tauri-plugin-single-instance",
+ "tauri-plugin-store",
+ "tauri-plugin-updater",
+ "tauri-plugin-window-state",
+ "time",
+ "tokio",
+ "tower",
+ "tower-http",
+ "urlencoding",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "gtk"
 version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6648,39 +6681,6 @@ dependencies = [
  "quote",
  "syn 2.0.117",
  "synstructure",
-]
-
-[[package]]
-name = "ytubic"
-version = "0.3.3"
-dependencies = [
- "axum",
- "cookie",
- "discord-rich-presence",
- "md5",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "souvlaki",
- "tauri",
- "tauri-build",
- "tauri-plugin-autostart",
- "tauri-plugin-dialog",
- "tauri-plugin-http",
- "tauri-plugin-notification",
- "tauri-plugin-opener",
- "tauri-plugin-process",
- "tauri-plugin-shell",
- "tauri-plugin-single-instance",
- "tauri-plugin-store",
- "tauri-plugin-updater",
- "tauri-plugin-window-state",
- "time",
- "tokio",
- "tower",
- "tower-http",
- "urlencoding",
- "windows-sys 0.59.0",
 ]
 
 [[package]]

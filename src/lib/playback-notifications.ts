@@ -10,7 +10,7 @@ import { useSettingsStore } from "@/lib/store/settings";
  *
  * The "is the user already looking at the app?" suppression lives in
  * the Rust `notify_track` command, where every window's focus state is
- * visible — toasts only show while YTubic sits in the background or
+ * visible — toasts only show while Goosic sits in the background or
  * the tray.
  */
 export function usePlaybackNotifications(): void {
@@ -33,9 +33,7 @@ export function usePlaybackNotifications(): void {
     if (!enabled || prev === videoId) return;
 
     const artists =
-      track?.artists?.map((a) => a.name).join(", ") ||
-      track?.subtitle ||
-      "";
+      track?.artists?.map((a) => a.name).join(", ") || track?.subtitle || "";
     invoke("notify_track", {
       title: track?.title ?? "Now playing",
       body: artists,
