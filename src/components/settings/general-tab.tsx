@@ -6,6 +6,7 @@ import {
   BellIcon,
   Loader2Icon,
   LogInIcon,
+  RadioIcon,
   RocketIcon,
   UserRoundIcon,
   XIcon,
@@ -15,6 +16,7 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Group, SettingRow, TabPane } from "@/components/settings/primitives";
+import { usePlaybackStore } from "@/lib/store/playback";
 import { useSettingsStore } from "@/lib/store/settings";
 
 export function GeneralTab() {
@@ -120,6 +122,8 @@ function BehaviorGroup() {
   const setPlaybackNotifications = useSettingsStore(
     (s) => s.setPlaybackNotifications,
   );
+  const autoRadio = usePlaybackStore((s) => s.autoRadio);
+  const setAutoRadio = usePlaybackStore((s) => s.setAutoRadio);
 
   const qc = useQueryClient();
   const autostart = useQuery({
@@ -176,6 +180,18 @@ function BehaviorGroup() {
             checked={closeAction === "tray"}
             onCheckedChange={(v) => setCloseAction(v ? "tray" : "quit")}
             aria-label="Close to tray"
+          />
+        }
+      />
+      <SettingRow
+        icon={RadioIcon}
+        title="Autoplay radio"
+        description="Keep playing similar songs when the queue ends. Loop takes priority."
+        control={
+          <Switch
+            checked={autoRadio}
+            onCheckedChange={setAutoRadio}
+            aria-label="Autoplay radio"
           />
         }
       />

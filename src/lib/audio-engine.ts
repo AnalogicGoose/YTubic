@@ -480,11 +480,12 @@ export function useAudioEngine() {
   // Auto-extend the queue with radio tracks when we're near the end, so
   // playback continues past the explicit queue.
   const autoRadio = usePlaybackStore((s) => s.autoRadio);
-  const { qLen, qIndex, seedVideoId } = usePlaybackStore(
+  const { qLen, qIndex, seedVideoId, repeat } = usePlaybackStore(
     useShallow((s) => ({
       qLen: s.queue.length,
       qIndex: s.index,
       seedVideoId: s.index >= 0 ? s.queue[s.index]?.videoId : undefined,
+      repeat: s.repeat,
     })),
   );
   const radioFetchedForRef = useRef<string | undefined>(undefined);
@@ -493,6 +494,9 @@ export function useAudioEngine() {
     if (qIndex < 0 || !seedVideoId) return;
     // Only fire when the current track is the last queued one.
     if (qIndex < qLen - 1) return;
+    // Loop takes priority over radio: never extend the queue while repeat
+    // is on, so `next()`'s own loop logic wins instead of racing with us.
+    if (repeat !== "off") return;
     if (radioFetchedForRef.current === seedVideoId) return;
     radioFetchedForRef.current = seedVideoId;
     fetchRadio(seedVideoId)
@@ -510,7 +514,7 @@ export function useAudioEngine() {
         // Allow a retry on transient failure.
         radioFetchedForRef.current = undefined;
       });
-  }, [autoRadio, qIndex, qLen, seedVideoId]);
+  }, [autoRadio, qIndex, qLen, seedVideoId, repeat]);
 
   // Push metadata + playback state to the OS media controls (Windows SMTC).
   // Windows interpolates the scrubber between pushes while the state is
