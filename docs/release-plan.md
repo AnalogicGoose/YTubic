@@ -238,8 +238,61 @@ problem, add Fider/Canny later and just change the button's URL.
       on its own (latest.json resolves only for published releases)
 - [ ] Post-release issue monitoring; a quick-patch plan in case yt-dlp breaks
 
+### Phase 5 — Linux release
+
+- [x] `secure_store` (2026-07-13): DPAPI split into a proper three-way cfg
+      (Windows/Linux/other) in the new `src-tauri/src/secure_store.rs`.
+      Linux gets real encryption, not the old plaintext fallback: a random
+      AES-256 key lives in the OS keyring (`keyring` crate,
+      `linux-native-sync-persistent` — secret-service backed by GNOME
+      Keyring/KWallet, cached in kernel keyutils), and the cookie blob is
+      AES-256-GCM encrypted with that key. A self-describing tag byte keeps
+      the old plaintext behavior as a graceful fallback when no keyring
+      backend is reachable (headless machines, some minimal WMs), instead
+      of hard-failing login.
+- [x] Packaging (2026-07-13): `src-tauri/tauri.linux.conf.json` adds
+      `appimage`/`deb`/`rpm` bundle targets (Tauri auto-merges per-platform
+      config files). No native Arch/AUR package — Arch is covered by the
+      AppImage, which needs no install step. Verified locally: `.deb`
+      builds, installs cleanly via `apt install`, resolves its
+      webkit2gtk/appindicator3/gtk3 runtime deps, and its `.desktop`
+      entry + hicolor icons (32/128/256/512) land correctly; the app binary
+      itself only fails to launch for the expected reason (no GTK display
+      in a headless sandbox).
+- [x] CI/release (2026-07-13): `.github/workflows/release.yml` now has a
+      `build-linux` job (`needs: build-windows`, sequential — not a
+      parallel matrix — to avoid `tauri-action` creating two separate
+      GitHub Releases for the same tag) that builds and publishes the
+      Linux artifacts alongside the Windows ones. `ci.yml`'s Linux job
+      gained `libdbus-1-dev` for the keyring's secret-service backend.
+- [x] Also fixed while testing: the "glass" surfaces (dropdown/context
+      menus, popover, player bar) relied on `backdrop-filter` staying
+      near-invisible until blur softened whatever was behind them.
+      WebKitGTK recognizes `backdrop-filter` in `@supports` but doesn't
+      reliably paint it, so those surfaces read as barely-tinted glass with
+      sharp content bleeding through on Linux. `src/lib/platform.ts` +
+      `src/components/ui/glass-surface.ts` now detect the Linux webview at
+      runtime and fall back to the opaque base look instead of the
+      blur-dependent one.
+- [ ] Manual QA pass on a real Linux desktop (not doable from this
+      sandbox — no GUI): cookie login/keyring round-trip on GNOME and KDE
+      (and the plaintext-fallback path when no secret-service provider is
+      running), MPRIS media controls, tray icon (note the GNOME
+      AppIndicator-extension caveat), autostart, single-instance, AppImage
+      run (incl. distros without `libfuse2`), and the in-app updater
+      against the AppImage build specifically.
+- [ ] Dry-run the release workflow on a throwaway tag (e.g. `v0.0.0-test1`)
+      to confirm `build-linux`'s artifacts land on the same Release the
+      Windows job created, then delete the test tag/release.
+- [ ] README/roadmap updates — done alongside the code (see README.md,
+      docs/feature-roadmap.md)
+
 ### Deferred / post-release
 
 - Code signing (Azure Trusted Signing) — once SmartScreen complaints appear
 - Fider/Canny for feedback — if a GitHub account turns out to be a barrier
-- macOS/Linux — will require replacing the DPAPI and SMTC layers
+- macOS — will require its own Keychain-backed `secure_store` path (Linux is
+  now done, see Phase 5 above)
+- Arch/AUR native package (`PKGBUILD`) — optional, maintained separately
+  outside the automated release; Arch users are covered by the AppImage
+  in the meantime

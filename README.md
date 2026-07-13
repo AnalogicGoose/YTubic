@@ -5,7 +5,7 @@
 <h1 align="center">Goosic</h1>
 
 <p align="center">
-  A fast, responsive YouTube Music desktop client for Windows.
+  A fast, responsive YouTube Music desktop client for Windows and Linux.
 </p>
 
 <p align="center">
@@ -15,6 +15,9 @@
 <p align="center">
   <a href="https://github.com/AnalogicGoose/YTubic/releases/latest">
     <img src="https://img.shields.io/badge/%E2%AC%87%20Download%20for%20Windows-FF0000?style=for-the-badge&logo=youtube&logoColor=white" alt="Download for Windows" height="60" />
+  </a>
+  <a href="https://github.com/AnalogicGoose/YTubic/releases/latest">
+    <img src="https://img.shields.io/badge/%E2%AC%87%20Download%20for%20Linux-FF0000?style=for-the-badge&logo=linux&logoColor=white" alt="Download for Linux" height="60" />
   </a>
 </p>
 
@@ -31,6 +34,7 @@ Built as a reaction to the sluggish webview-wrapper experience — Goosic talks 
 - **Hi-res cover art** — upgrades album covers to high-resolution studio art when available
 - **Full library support** — your playlists, likes, albums and artists; search with filters; radio/autoplay queues
 - **Windows integration** — media keys, System Media Transport Controls, tray icon, single instance
+- **Linux integration** — media keys via MPRIS, tray icon (needs an AppIndicator/KStatusNotifierItem extension on vanilla GNOME — see FAQ), autostart, single instance
 - **Auto-updates** — the app updates itself from GitHub Releases, and keeps its yt-dlp copy fresh automatically
 
 > **Disclaimer:** Goosic is an unofficial client. It is not affiliated with,
@@ -41,9 +45,13 @@ Built as a reaction to the sluggish webview-wrapper experience — Goosic talks 
 
 ## Install
 
-Download the latest installer from the [Releases](https://github.com/AnalogicGoose/YTubic/releases) page and run it.
+Download the latest package from the [Releases](https://github.com/AnalogicGoose/YTubic/releases) page and run it.
 
-- **Windows 10/11 only** for now.
+- **Windows**: `.exe` installer (NSIS), Windows 10/11.
+- **Linux**: `.AppImage` (runs on any distro, including Arch — no install
+  step, just `chmod +x` and run), `.deb` (Debian/Ubuntu), or `.rpm`
+  (Fedora/openSUSE). There's no native Arch/AUR package for now — the
+  AppImage is the way to run Goosic on Arch.
 - On first launch the app downloads its own copy of yt-dlp (~12 MB) into its
   data folder and keeps it updated automatically.
 - Signing in is optional: browse and playback work anonymously; sign in to get
@@ -72,9 +80,20 @@ YouTube periodically changes its streaming internals. yt-dlp usually ships a
 fix within days, and the app picks it up automatically (it self-updates its
 yt-dlp copy every ~3 days). Restarting the app forces the check.
 
+**The AppImage won't run / complains about FUSE.**
+Some distros no longer ship `libfuse2` by default, which older AppImages need
+to mount themselves. Either install `libfuse2` (or `fuse`) from your distro's
+package manager, or run the AppImage with `--appimage-extract-and-run`.
+
+**No tray icon shows up on GNOME.**
+Vanilla GNOME Shell doesn't show any application tray icons without an
+AppIndicator/KStatusNotifierItem extension installed (this isn't
+Goosic-specific — it affects every app that uses a tray icon on GNOME).
+
 ## Stack
 
-- **Shell:** Tauri 2 (Rust backend, system webview — WebView2 on Windows)
+- **Shell:** Tauri 2 (Rust backend, system webview — WebView2 on Windows,
+  WebKitGTK on Linux)
 - **Frontend:** React 19 + TypeScript
 - **Build:** Vite 7
 - **Styling:** Tailwind CSS v4

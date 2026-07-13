@@ -6,7 +6,7 @@ Date: 2026-07-06.
 - [ ] Crossfade
 - [ ] Queue/playlist view instead of lyrics
 - [ ] Windows media controls (SMTC)
-- [ ] Linux version
+- [x] Linux version (built and packaged — AppImage/deb/rpm, keyring-backed cookie encryption; pending a manual QA pass on a real GNOME/KDE desktop, see docs/release-plan.md)
 - [ ] macOS version
 - [x] Ability to pick different channels/sub-profiles for a single account
 - [ ] Auto Mix

@@ -81,6 +81,18 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_Shell",
 ] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Linux equivalent of Windows DPAPI in src/secure_store.rs: a random AES key
+# lives in the OS keyring (secret-service — GNOME Keyring / KWallet — with a
+# kernel-keyutils fallback), and the cookie blob itself is AES-256-GCM
+# encrypted locally with that key (keyrings aren't meant for arbitrary-length
+# blobs, only the key is). `keyring` ships with zero backends enabled by
+# default: "linux-native-sync-persistent" pulls in both the blocking
+# secret-service client (`dbus-secret-service`, needs system libdbus) and the
+# kernel keyutils backend, matching our synchronous (spawn_blocking) usage.
+keyring = { version = "3", features = ["linux-native-sync-persistent"] }
+aes-gcm = "0.10"
+
 [dev-dependencies]
 # ServiceExt::oneshot for the stream-server routing test.
 tower = { version = "0.5", features = ["util"] }

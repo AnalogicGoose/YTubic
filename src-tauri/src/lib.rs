@@ -28,6 +28,7 @@ mod appid;
 mod discord;
 mod lastfm;
 mod media;
+mod secure_store;
 mod ytdlp;
 
 fn sanitize_video_id(id: &str) -> bool {
@@ -36,103 +37,6 @@ fn sanitize_video_id(id: &str) -> bool {
         && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-}
-
-/// Platform-native symmetric "encrypt with current user's credentials"
-/// primitive. On Windows we use DPAPI (CryptProtectData) — the blob is
-/// only decryptable by the same Windows user on the same machine. On
-/// other platforms we currently fall back to plaintext (FIXME: hook
-/// into macOS Keychain / libsecret when we ship beyond Windows).
-///
-/// A fixed `ENTROPY` byte string is mixed in so a *different* app
-/// running as the same user can't trivially pass our blob to
-/// CryptUnprotectData and get our cookies out. This is a small hurdle
-/// against generic credential-stealer malware, not a real boundary —
-/// any attacker with our binary can read the entropy string.
-mod secure_store {
-    #[cfg(windows)]
-    // Keeps the historical "ytm-native" tag on purpose: this string is
-    // baked into every existing encrypted cookie jar, and changing it
-    // would orphan them all. It's an opaque salt, not a product name.
-    const ENTROPY: &[u8] = b"ytm-native/cookies.enc v1";
-
-    #[cfg(windows)]
-    pub fn encrypt(plain: &[u8]) -> Result<Vec<u8>, String> {
-        use std::ptr;
-        use windows_sys::Win32::Foundation::LocalFree;
-        use windows_sys::Win32::Security::Cryptography::{CryptProtectData, CRYPT_INTEGER_BLOB};
-        unsafe {
-            let in_blob = CRYPT_INTEGER_BLOB {
-                cbData: plain.len() as u32,
-                pbData: plain.as_ptr() as *mut u8,
-            };
-            let ent_blob = CRYPT_INTEGER_BLOB {
-                cbData: ENTROPY.len() as u32,
-                pbData: ENTROPY.as_ptr() as *mut u8,
-            };
-            let mut out_blob: CRYPT_INTEGER_BLOB = std::mem::zeroed();
-            let ok = CryptProtectData(
-                &in_blob,
-                ptr::null(),
-                &ent_blob,
-                ptr::null_mut(),
-                ptr::null(),
-                0,
-                &mut out_blob,
-            );
-            if ok == 0 {
-                return Err("CryptProtectData failed".into());
-            }
-            let data =
-                std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec();
-            LocalFree(out_blob.pbData as _);
-            Ok(data)
-        }
-    }
-
-    #[cfg(windows)]
-    pub fn decrypt(encrypted: &[u8]) -> Result<Vec<u8>, String> {
-        use std::ptr;
-        use windows_sys::Win32::Foundation::LocalFree;
-        use windows_sys::Win32::Security::Cryptography::{CryptUnprotectData, CRYPT_INTEGER_BLOB};
-        unsafe {
-            let in_blob = CRYPT_INTEGER_BLOB {
-                cbData: encrypted.len() as u32,
-                pbData: encrypted.as_ptr() as *mut u8,
-            };
-            let ent_blob = CRYPT_INTEGER_BLOB {
-                cbData: ENTROPY.len() as u32,
-                pbData: ENTROPY.as_ptr() as *mut u8,
-            };
-            let mut out_blob: CRYPT_INTEGER_BLOB = std::mem::zeroed();
-            let ok = CryptUnprotectData(
-                &in_blob,
-                ptr::null_mut(),
-                &ent_blob,
-                ptr::null_mut(),
-                ptr::null(),
-                0,
-                &mut out_blob,
-            );
-            if ok == 0 {
-                return Err("CryptUnprotectData failed".into());
-            }
-            let data =
-                std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec();
-            LocalFree(out_blob.pbData as _);
-            Ok(data)
-        }
-    }
-
-    #[cfg(not(windows))]
-    pub fn encrypt(plain: &[u8]) -> Result<Vec<u8>, String> {
-        Ok(plain.to_vec())
-    }
-
-    #[cfg(not(windows))]
-    pub fn decrypt(encrypted: &[u8]) -> Result<Vec<u8>, String> {
-        Ok(encrypted.to_vec())
-    }
 }
 
 /// Per-account metadata persisted in `accounts.json`. Cookies are NOT
@@ -299,8 +203,9 @@ async fn migrate_plaintext_cookies(app: &tauri::AppHandle) {
     let Ok(plain) = tokio::fs::read(&old_path).await else {
         return;
     };
-    match secure_store::encrypt(&plain) {
-        Ok(enc) => {
+    let result = tokio::task::spawn_blocking(move || secure_store::encrypt(&plain)).await;
+    match result {
+        Ok(Ok(enc)) => {
             if let Err(e) = tokio::fs::write(&enc_path, enc).await {
                 eprintln!("[auth] migration write failed: {e}");
                 return;
@@ -308,7 +213,8 @@ async fn migrate_plaintext_cookies(app: &tauri::AppHandle) {
             let _ = tokio::fs::remove_file(&old_path).await;
             eprintln!("[auth] migrated plaintext cookies.txt to encrypted cookies.enc");
         }
-        Err(e) => eprintln!("[auth] migration encrypt failed: {e}"),
+        Ok(Err(e)) => eprintln!("[auth] migration encrypt failed: {e}"),
+        Err(e) => eprintln!("[auth] migration encrypt join failed: {e}"),
     }
 }
 
