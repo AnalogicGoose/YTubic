@@ -38,6 +38,21 @@ export type WhatsNewEntry = {
  */
 export const WHATS_NEW: WhatsNewEntry[] = [
   {
+    version: "0.3.4",
+    date: "July 2026",
+    image: "/whats-new/0.3.0.svg",
+    sections: [
+      {
+        heading: "Autoplay controls",
+        items: [
+          "Toggle YouTube radio autoplay directly from either player layout.",
+          "Control the default autoplay behavior from General settings.",
+          "Repeat and queue behavior now take priority over autoplay at the end of playback.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.3.3",
     date: "July 2026",
     image: "/whats-new/0.3.0.svg",
