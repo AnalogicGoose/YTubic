@@ -688,7 +688,7 @@ export function PlayerBar({
               </TooltipTrigger>
               <TooltipContent side="bottom">Autoplay</TooltipContent>
             </Tooltip>
-            <VolumeControl />
+            <VolumeControl direction="vertical" />
           </div>
           <div className="flex items-center gap-1">
             {track && <SourceToggle track={track} />}

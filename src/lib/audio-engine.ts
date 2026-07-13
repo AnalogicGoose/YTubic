@@ -150,6 +150,16 @@ export function useAudioEngine() {
         // Keep `playing: true` so the new track auto-resumes.
         s.next();
       } else {
+        // 3 tracks in a row failing to load (while cached ones keep playing
+        // fine) is the signature of YouTube throttling this connection,
+        // rather than any one track being broken — say so instead of
+        // leaving the raw MEDIA_ERR_* code on screen.
+        if (consecutiveErrorsRef.current > 3) {
+          store().setStatus(
+            "error",
+            "YouTube está limitando tu conexión — la reproducción se pausó. Prueba en un rato o con otra red/VPN.",
+          );
+        }
         s.setPlaying(false);
       }
     };

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command as TokioCommand;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, Semaphore};
 
 use axum::{
     extract::{Path, Request, State as AxumState},
@@ -2115,6 +2115,11 @@ struct StreamServer {
     /// `ytdlp::program` so a mid-session download takes effect
     /// immediately.
     ytdlp_bin: PathBuf,
+    /// Caps combined on-demand + prefetch yt-dlp concurrency. Without this,
+    /// a burst of rapid track skips or prefetch spawns can fire many yt-dlp
+    /// processes against YouTube from one IP at once, which accelerates
+    /// soft-throttling. See `spawn_downloader`.
+    limiter: Arc<Semaphore>,
 }
 
 /// Read the `ephemeral` query flag from a stream/prefetch request.
@@ -2339,15 +2344,44 @@ async fn get_stream_base_url(state: tauri::State<'_, StreamServerState>) -> Resu
 /// `target_dir` selects which on-disk pool to write to (persistent or
 /// ephemeral). `map_key` is the prefixed key in `srv.downloads` so a
 /// single videoId can be in-flight independently for both pools.
+///
+/// `is_prefetch` gates how the download waits for a `srv.limiter` slot:
+/// on-demand (`/stream`) waits for one to free up, since the user is
+/// actively waiting on it; prefetch (`/prefetch`) only takes a slot if one
+/// is immediately free and otherwise bails without spawning yt-dlp at all —
+/// prefetch is best-effort, and a skipped prefetch is resolved by the
+/// on-demand request that follows it.
 fn spawn_downloader(
     video_id: String,
     target_dir: PathBuf,
     map_key: String,
     srv: StreamServer,
     state: Arc<DownloadState>,
+    is_prefetch: bool,
 ) {
     let downloads = srv.downloads.clone();
     tokio::spawn(async move {
+        // Cap combined on-demand + prefetch yt-dlp concurrency (see
+        // `StreamServer::limiter`) before touching disk or the network, so a
+        // queued prefetch doesn't do anything until it's actually its turn.
+        let _permit = if is_prefetch {
+            match srv.limiter.clone().try_acquire_owned() {
+                Ok(p) => p,
+                Err(_) => {
+                    eprintln!("[stream] prefetch {video_id}: no free slot, skipping");
+                    state.complete.store(true, Ordering::Release);
+                    state.notify.notify_waiters();
+                    downloads.lock().await.remove(&map_key);
+                    return;
+                }
+            }
+        } else {
+            srv.limiter.clone().acquire_owned().await.expect(
+                "semaphore never closed: StreamServer's Arc<Semaphore> is never explicitly closed \
+                 and outlives every acquire call",
+            )
+        };
+
         let url = format!("https://www.youtube.com/watch?v={video_id}");
         let part_path = target_dir.join(format!("{video_id}.part"));
         let final_path = target_dir.join(format!("{video_id}.webm"));
@@ -2365,14 +2399,18 @@ fn spawn_downloader(
             // YouTube regularly hands out a signed media URL that then 403s
             // on the very first byte-range request (token/pot desync or
             // per-URL throttling). Left alone this surfaces as a one-off
-            // "download failed" that a manual re-click fixes. Retrying the
-            // data download and the extractor a few times clears the vast
-            // majority of these inside a single spawn, before the handler
-            // ever returns 502 to the audio element.
+            // "download failed" that a manual re-click fixes. A couple of
+            // retries clears most of these inside a single spawn, before the
+            // handler ever returns 502 to the audio element. Kept low
+            // (rather than the more thorough 5/3 this used to be): once
+            // YouTube starts throttling an IP, every failed track was
+            // costing ~15 requests here, which only hastens the block. The
+            // frontend's own single auto-retry (audio-engine.ts) already
+            // covers the common transient case without hammering further.
             "--retries",
-            "5",
+            "2",
             "--extractor-retries",
-            "3",
+            "1",
             "--socket-timeout",
             "15",
             "--extractor-args",
@@ -2624,6 +2662,7 @@ async fn stream_handler(
                     map_key.clone(),
                     srv.clone(),
                     s.clone(),
+                    false,
                 );
                 s
             }
@@ -2773,7 +2812,7 @@ async fn prefetch_handler(
         map.insert(map_key.clone(), state.clone());
         state
     };
-    spawn_downloader(video_id, target_dir, map_key, srv.clone(), state);
+    spawn_downloader(video_id, target_dir, map_key, srv.clone(), state, true);
     StatusCode::ACCEPTED
 }
 
@@ -2836,6 +2875,10 @@ async fn start_stream_server(
         cover_dir,
         downloads: Arc::new(Mutex::new(HashMap::new())),
         ytdlp_bin,
+        // One slot for whatever's currently playing, one headroom so the
+        // next-track prefetch isn't fully blocked by it — but a burst of
+        // rapid skips still can't spawn more than 2 yt-dlp processes at once.
+        limiter: Arc::new(Semaphore::new(2)),
     };
 
     // Per-launch token as an unguessable path prefix. Baked into the base
