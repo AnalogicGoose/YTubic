@@ -13,6 +13,7 @@ import {
   Loader2Icon,
   MusicIcon,
   VideoIcon,
+  RadioIcon,
 } from "lucide-react";
 import { QueueBody, QueueToggleButton } from "@/components/layout/queue-panel";
 import {
@@ -399,18 +400,27 @@ export function PlayerBar({
 }: {
   variant?: PlayerBarVariant;
 }) {
-  const { playing, status, error, position, duration, shuffle, repeat } =
-    usePlaybackStore(
-      useShallow((s) => ({
-        playing: s.playing,
-        status: s.status,
-        error: s.error,
-        position: s.position,
-        duration: s.duration,
-        shuffle: s.shuffle,
-        repeat: s.repeat,
-      })),
-    );
+  const {
+    playing,
+    status,
+    error,
+    position,
+    duration,
+    shuffle,
+    repeat,
+    autoRadio,
+  } = usePlaybackStore(
+    useShallow((s) => ({
+      playing: s.playing,
+      status: s.status,
+      error: s.error,
+      position: s.position,
+      duration: s.duration,
+      shuffle: s.shuffle,
+      repeat: s.repeat,
+      autoRadio: s.autoRadio,
+    })),
+  );
   const track = usePlaybackStore(currentTrack);
   const toggle = usePlaybackStore((s) => s.toggle);
   const next = usePlaybackStore((s) => s.next);
@@ -418,6 +428,7 @@ export function PlayerBar({
   const seek = usePlaybackStore((s) => s.seek);
   const setShuffle = usePlaybackStore((s) => s.setShuffle);
   const cycleRepeat = usePlaybackStore((s) => s.cycleRepeat);
+  const setAutoRadio = usePlaybackStore((s) => s.setAutoRadio);
 
   const [scrub, setScrub] = useState<number | null>(null);
   const [queueOpen, setQueueOpen] = useState(false);
@@ -662,6 +673,21 @@ export function PlayerBar({
               open={queueOpen}
               onToggle={() => setQueueOpen((v) => !v)}
             />
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  aria-label="Autoplay"
+                  aria-pressed={autoRadio}
+                  onClick={() => setAutoRadio(!autoRadio)}
+                  className={cn(autoRadio && "text-brand")}
+                >
+                  <RadioIcon />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">Autoplay</TooltipContent>
+            </Tooltip>
             <VolumeControl />
           </div>
           <div className="flex items-center gap-1">
