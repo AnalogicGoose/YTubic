@@ -62,8 +62,15 @@ cd src-tauri/target/release/bundle/appimage
 OUTPUT="$(pwd)/Goosic_<version>_amd64.AppImage" \
 ARCH=x86_64 \
 PATH="$HOME/.cache/tauri:$PATH" \
-/tmp/linuxdeploy-extracted/squashfs-root/AppRun --verbosity 1 --appdir ./Goosic.AppDir --plugin gtk --output appimage
+/tmp/linuxdeploy-extracted/squashfs-root/AppRun --verbosity 1 --appdir ./Goosic.AppDir --plugin gtk --plugin gstreamer --output appimage
 ```
+
+El plugin GStreamer del último comando es obligatorio desde el fix del AppImage multimedia;
+sin él, el AppImage vuelve a quedar sin `appsink`/`autoaudiosink` y puede congelar el
+`WebKitWebProcess` al reproducir audio. El sistema de build necesita instalados los plugins
+GStreamer base, good, bad y libav para que `linuxdeploy-plugin-gstreamer` pueda copiarlos.
+Tauri solo considera este bundling completamente soportado en Ubuntu; en Arch/CachyOS sigue
+siendo un flujo local de prueba.
 
 Con esto el `.AppImage` se genera bien (probado, arrancó y corrió — ver
 `docs/linux-appimage-black-screen.md` para lo que se encontró al correrlo).

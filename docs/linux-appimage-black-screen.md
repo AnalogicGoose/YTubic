@@ -1,7 +1,34 @@
 # Linux AppImage: se congela y se pone en negro al interactuar
 
-Estado: **investigando** (2026-07-13). Documento vivo — se actualiza a medida que se
-prueba localmente.
+Estado: **causa identificada y fix aplicado, pendiente de validar en el próximo AppImage**
+(2026-07-13).
+
+## Causa confirmada
+
+El patrón exacto de stderr no es solo un problema del renderer:
+
+```text
+GStreamer element appsink not found. Please install it.
+GStreamer element autoaudiosink not found. Please install it
+GLib-GObject-CRITICAL: invalid (NULL) pointer instance
+g_signal_connect_data: assertion 'G_TYPE_CHECK_INSTANCE (instance)' failed
+```
+
+Tauri documenta ese mismo fallo para AppImages multimedia sin el framework GStreamer
+completo. `appsink` viene de los plugins base y `autoaudiosink` de los plugins good. El
+AppImage aislaba `GST_PLUGIN_SYSTEM_PATH_1_0` hacia su propio directorio, pero Goosic no
+tenía activado `bundle.linux.appimage.bundleMediaFramework`; por eso no podía usar los
+plugins instalados en el host y el `WebKitWebProcess` terminaba muriendo.
+
+El fix hace dos cosas:
+
+1. Activa `bundle.linux.appimage.bundleMediaFramework` en `tauri.conf.json`.
+2. Instala `gstreamer1.0-plugins-base`, `good`, `bad` y `libav` en el runner Ubuntu antes
+   de empaquetar. El workflow comprueba tanto los elementos del host como
+   `libgstapp.so`, `libgstautodetect.so` y `libgstlibav.so` dentro del AppImage final.
+
+El workaround DMABUF permanece como defensa para GPUs/compositores problemáticos, pero
+no era suficiente para este crash del AppImage.
 
 ## Síntoma reportado
 
@@ -15,7 +42,7 @@ prueba localmente.
 - Máquina de prueba del usuario: Linux (mismo perfil que el entorno de desarrollo de este
   repo — CachyOS/Arch, KDE Plasma, **Wayland**).
 
-## Hipótesis principal
+## Hipótesis inicial del renderer (defensa conservada)
 
 WebKitGTK tiene un bug conocido con su renderer DMABUF en varios compositores Wayland:
 cuelga/pinta en negro en el primer paint pesado de GPU. Ya lo habíamos pisado en
@@ -34,8 +61,9 @@ if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
 }
 ```
 
-**Pendiente de confirmar:** si esto realmente resuelve el síntoma reportado, o si el
-freeze+negro tiene una causa adicional/distinta (ver sección de resultados abajo).
+La prueba posterior demostró que este workaround no bastaba: el AppImage fuerza X11 y,
+además, le faltaban plugins GStreamer. Se conserva porque sigue protegiendo otros casos
+conocidos de WebKitGTK/Wayland, pero ya no se considera la solución principal.
 
 ## Plan de repro local
 
@@ -73,6 +101,7 @@ defecto**, citando un issue de Tauri de 2024 sobre crashes en Wayland nativo. Es
 del proyecto (viene de `linuxdeploy-plugin-gtk`, no de nuestro código) y nadie lo había tocado.
 
 Confirmado en el proceso corriendo de verdad:
+
 ```
 $ cat /proc/<pid-de-goosic>/environ | tr '\0' '\n' | grep -E "GDK_BACKEND|WAYLAND_DISPLAY"
 WAYLAND_DISPLAY=wayland-0
@@ -80,6 +109,7 @@ GDK_BACKEND=x11
 ```
 
 Y confirmado que la ventana es un cliente XWayland real (no Wayland nativo) vía `xprop`:
+
 ```
 $ xprop -root _NET_CLIENT_LIST
 _NET_CLIENT_LIST(WINDOW): window id # 0x100000b, 0x3000003
@@ -88,6 +118,7 @@ _NET_WM_NAME(UTF8_STRING) = "Goosic"
 _NET_WM_PID(CARDINAL) = <pid>
 WM_CLASS(STRING) = "goosic", "Goosic"
 ```
+
 (una ventana Wayland nativa no aparecería en absoluto en `_NET_CLIENT_LIST`, que es una
 propiedad puramente X11 — solo XWayland la expone ahí).
 
@@ -117,12 +148,15 @@ punto el compositor deja de recibir contenido pintado de ella del todo. Esto es 
 correctamente enlazado a la superficie/ventana X11 original.
 
 También aparecen, en cada arranque (probablemente sin relación, no confirmado):
+
 ```
 GStreamer element appsink not found. Please install it.
 GStreamer element autoaudiosink not found. Please install it
 ```
-Candidato a ruido inofensivo (plumbing de metadata MPRIS/`souvlaki` sondeando GStreamer
-opcionalmente), pero no descartado del todo.
+
+Estas líneas no eran ruido: coinciden exactamente con los reportes upstream de AppImages
+Tauri cuyo WebKit queda sin los plugins multimedia requeridos. Son la señal que llevó al
+fix de `bundleMediaFramework` descrito al inicio de este documento.
 
 ### Descartado: no es un artefacto de cómo se lanzó la prueba
 
@@ -135,25 +169,16 @@ lanzado por el propio `AppImageLauncher`, no por este script). Resultado: **el m
 al 86% CPU) desaparece por completo de una captura de pantalla completa. Se reproduce igual sin
 importar cómo se lance. No es un artefacto de la prueba — es un bug real de la app empaquetada.
 
-## Siguientes pasos (para retomar con más créditos)
+## Validación pendiente
 
-1. **Probar `GDK_BACKEND=wayland` explícito**, sobreescribiendo lo que fuerza
-   `linuxdeploy-plugin-gtk.sh`, junto con nuestro fix `WEBKIT_DISABLE_DMABUF_RENDERER=1` — para
-   ver si Wayland nativo + el fix ya resuelve todo. El issue que motivó forzar x11
-   (tauri-apps/tauri#8541) es de 2024; puede que ya no aplique con las versiones actuales
-   (Tauri 2.10.3, webkit2gtk-4.1 en este sistema).
-2. Si Wayland nativo sigue crasheando (confirmando que el x11-forzado es necesario), el bug real
-   a perseguir es el `GLib-GObject-CRITICAL: invalid (NULL) pointer instance` dentro de
-   `WebKitWebProcess` bajo XWayland — buscar qué signal-connect está fallando (podría ser
-   accesibilidad/a11y, un módulo IM bundleado por `linuxdeploy-plugin-gtk`, o algo del tema
-   GTK — el hook hace `gsettings get org.gnome.desktop.interface gtk-theme`, que en KDE puede no
-   existir el schema).
-3. **Descartar el artefacto de lanzamiento**: pedir al usuario que pruebe haciendo doble-click
-   normal en el AppImage (no desde terminal/background) y confirmar si el freeze es idéntico.
-4. Si nada de lo anterior resuelve, considerar detectar Wayland en runtime y ajustar el fallback
-   (mismo patrón que ya existe en `src/lib/platform.ts` / `glass-surface.ts` para
-   `backdrop-filter`), o evaluar deshabilitar aceleración GPU del webview por completo en Linux
-   como último recurso.
+1. Crear el siguiente AppImage en GitHub Actions; el workflow debe pasar sus comprobaciones
+   de plugins empaquetados.
+2. Ejecutarlo en CachyOS/KDE/Wayland, esperar más de un minuto y reproducir varias canciones.
+3. Confirmar que ya no aparecen los avisos `appsink`/`autoaudiosink`, que el
+   `WebKitWebProcess` conserva su PID y que la ventana sigue respondiendo.
+4. Solo si el AppImage con GStreamer completo todavía falla, retomar las pruebas de backend
+   Wayland/XWayland o `WEBKIT_DISABLE_COMPOSITING_MODE=1`; desactivar toda la aceleración
+   continúa siendo el último recurso por su impacto de rendimiento.
 
 ## Nota aparte: compilar el AppImage localmente en este dev machine (CachyOS/Arch) falla sin un workaround
 

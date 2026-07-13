@@ -1,23 +1,28 @@
 # CI: `build-linux` falló en el release v0.4.1
 
-Estado: **sin diagnosticar a fondo** (2026-07-13) — falta acceso autenticado a los logs.
+Estado: **resuelto por reintento** (2026-07-13). El run y el release están completos.
 
-## Qué se sabe
+## Resolución confirmada
+
+El mismo run se volvió a ejecutar y terminó correctamente. El job Linux compiló y
+subió `Goosic_0.4.1_amd64.AppImage`, `.deb`, `.rpm`, sus firmas y un `latest.json`
+con las plataformas Linux. El primer `Error: other side closed` fue transitorio;
+no hubo un fallo reproducible de compilación, memoria ni empaquetado en el reintento.
+
+Esto solo resuelve la publicación. El AppImage v0.4.1 todavía contiene el problema
+de runtime descrito en `docs/linux-appimage-black-screen.md`.
+
+## Historial del fallo inicial
 
 - Run: https://github.com/AnalogicGoose/Goosic/actions/runs/29284769657 (tag `v0.4.1`).
 - `build-windows`: éxito. `build-linux`: **falló** en el paso `tauri-apps/tauri-action@v0`.
-- Consecuencia: el release v0.4.1 solo publicó `Goosic_0.4.1_x64-setup.exe` (+`.sig`) y
-  `latest.json` con únicamente la plataforma `windows-x86_64` — **no hay AppImage/deb/rpm
-  de v0.4.1**. Los usuarios Linux siguen en v0.4.0 (que sí tiene todos los formatos, ver
-  release v0.4.0).
+- Durante el fallo inicial, el release v0.4.1 solo tenía el instalador Windows. El
+  reintento añadió después todos los artefactos Linux.
 - Error reportado por el usuario en la consola de GitHub Actions: `Error: other side closed`.
-- **No se pudo leer el log completo del job**: `GET /repos/.../actions/jobs/{id}/logs`
-  devuelve 403 sin autenticación, y este entorno no tiene un token de GitHub configurado
-  (solo hay una deploy key SSH, que sirve para git push/pull, no para la API REST). Falta
-  un fine-grained PAT con permiso `Actions: Read-only` en el repo, o `gh auth login`, para
-  poder leer el log exacto en vez de especular.
+- El entorno ya tiene autenticación de `gh` y se verificaron tanto el reintento como
+  los assets públicos del release.
 
-## Hipótesis (sin confirmar)
+## Hipótesis históricas (ya no requieren cambios)
 
 "Error: other side closed" en el paso de `tauri-action` para Linux suele ser un pipe roto
 porque el proceso hijo (el build de Rust/tauri) murió a mitad de camino. Candidatos, de
@@ -37,16 +42,6 @@ más a menos probable:
 
 ## Siguiente paso
 
-1. **Conseguir acceso de lectura a los logs** — fine-grained PAT (`Actions: Read-only`,
-   solo este repo) o `gh auth login`, para bajar el log real de
-   `https://github.com/AnalogicGoose/Goosic/actions/runs/29284769657/job/86936901543` y
-   confirmar cuál de las 3 hipótesis es la correcta.
-2. Si es la hipótesis 1 (red transitoria): probablemente basta con re-lanzar el job
-   ("Re-run failed jobs" en la UI de Actions) — no requiere cambios de código.
-3. Si es la hipótesis 2 (memoria): separar el build de Linux en 3 jobs (uno por bundle
-   target: appimage / deb / rpm) en vez de uno solo construyendo los 3, o usar un runner
-   con más recursos.
-4. Una vez resuelto, hay que **volver a publicar los artefactos Linux para v0.4.1**
-   (o directamente saltar a v0.4.2 con el fix del CI + lo que salga de
-   `docs/linux-appimage-black-screen.md`) — mientras tanto los usuarios Linux no tienen
-   forma de recibir el fix del DMABUF renderer vía auto-update.
+No cambiar el CI por este incidente aislado. El siguiente release debe validar que el
+AppImage incluye los plugins GStreamer requeridos y probar el fix de runtime descrito en
+`docs/linux-appimage-black-screen.md`.

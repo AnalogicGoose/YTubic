@@ -74,7 +74,21 @@ jobs:
       - name: Install Tauri system deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libdbus-1-dev
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libdbus-1-dev \
+            gstreamer1.0-tools \
+            gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad \
+            gstreamer1.0-libav
+      - name: Verify build-host media plugins
+        run: |
+          gst-inspect-1.0 appsink
+          gst-inspect-1.0 autoaudiosink
       - run: pnpm install --frozen-lockfile
       - uses: tauri-apps/tauri-action@v0
         env:
@@ -89,3 +103,15 @@ jobs:
           releaseBody: "See the assets below to download and install this version."
           releaseDraft: false
           prerelease: false
+      - name: Verify bundled AppImage media plugins
+        shell: bash
+        run: |
+          appimage="$(find src-tauri/target/release/bundle/appimage -maxdepth 1 -name '*.AppImage' -print -quit)"
+          test -n "$appimage"
+          chmod +x "$appimage"
+          mkdir -p "$RUNNER_TEMP/goosic-appimage-check"
+          cd "$RUNNER_TEMP/goosic-appimage-check"
+          "$GITHUB_WORKSPACE/$appimage" --appimage-extract >/dev/null
+          test -f squashfs-root/usr/lib/gstreamer-1.0/libgstapp.so
+          test -f squashfs-root/usr/lib/gstreamer-1.0/libgstautodetect.so
+          test -f squashfs-root/usr/lib/gstreamer-1.0/libgstlibav.so
