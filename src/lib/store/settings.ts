@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+import { isWindowsWebview } from "@/lib/platform";
 
 export type CloseButtonAction = "tray" | "quit";
 export type CacheAutoCleanPeriod = "off" | "daily" | "weekly" | "monthly";
@@ -21,6 +22,11 @@ type State = {
   /** Experimental animated mesh derived from the current cover. When false,
    *  Ambient mode uses the original blurred-cover implementation. */
   dynamicAlbumMesh: boolean;
+  /** Experimental true backdrop refraction on glass surfaces (menus,
+   *  popovers, player). Windows only: Chromium/WebView2 renders SVG filters
+   *  inside `backdrop-filter`; WebKit (macOS) doesn't and keeps the classic
+   *  blur material regardless of this flag. */
+  liquidGlassRefraction: boolean;
   /** System toast on track change while the app is in the background
    *  (see `lib/playback-notifications.ts`). */
   playbackNotifications: boolean;
@@ -51,6 +57,7 @@ type State = {
   markCacheCleaned: () => void;
   setBackground: (v: BackgroundMode) => void;
   setDynamicAlbumMesh: (v: boolean) => void;
+  setLiquidGlassRefraction: (v: boolean) => void;
   setPlaybackNotifications: (v: boolean) => void;
   setDiscordRichPresence: (v: boolean) => void;
   setLastfmEnabled: (v: boolean) => void;
@@ -76,6 +83,7 @@ export const useSettingsStore = create<State>()(
       lastCacheCleanAt: 0,
       background: "ambient",
       dynamicAlbumMesh: true,
+      liquidGlassRefraction: true,
       playbackNotifications: false,
       discordRichPresence: false,
       lastfmEnabled: false,
@@ -88,6 +96,8 @@ export const useSettingsStore = create<State>()(
       markCacheCleaned: () => set({ lastCacheCleanAt: Date.now() }),
       setBackground: (background) => set({ background }),
       setDynamicAlbumMesh: (dynamicAlbumMesh) => set({ dynamicAlbumMesh }),
+      setLiquidGlassRefraction: (liquidGlassRefraction) =>
+        set({ liquidGlassRefraction }),
       setPlaybackNotifications: (playbackNotifications) =>
         set({ playbackNotifications }),
       setDiscordRichPresence: (discordRichPresence) =>
@@ -138,6 +148,24 @@ export function useCloseBehaviorSync(): void {
       /* plain-vite dev without a Tauri backend — nothing to sync */
     });
   }, [closeAction]);
+}
+
+/**
+ * Toggle the `liquid-refract` class on <html> from the persisted experiment.
+ * The class upgrades every `.liquid-glass` surface to true backdrop
+ * refraction via the SVG lens filter (see `LiquidGlassDefs` and index.css).
+ * Windows-only: Chromium renders SVG filters in `backdrop-filter`; WebKit
+ * ignores the `url()` term, so macOS/Linux never get the class. Mounted in
+ * both AppShell and FloatingPlayerApp — separate JS contexts, same rule.
+ */
+export function useLiquidRefractionClass(): void {
+  const enabled = useSettingsStore((s) => s.liquidGlassRefraction);
+  useEffect(() => {
+    document.documentElement.classList.toggle(
+      "liquid-refract",
+      enabled && isWindowsWebview(),
+    );
+  }, [enabled]);
 }
 
 /**

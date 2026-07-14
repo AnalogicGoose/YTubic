@@ -12,6 +12,7 @@ import { FloatingPlayerSync } from "@/components/layout/floating-player-sync";
 import { DragSnapOverlay } from "@/components/layout/drag-snap-overlay";
 import { EntityPageHeader } from "@/components/layout/entity-page-header";
 import { NowPlayingBackground } from "@/components/layout/now-playing-background";
+import { LiquidGlassDefs } from "@/components/layout/liquid-glass-defs";
 import { SettingsDialog } from "@/components/settings/settings-dialog";
 import { PremiumGateDialog } from "@/components/layout/premium-gate-dialog";
 import { ChannelPickerDialog } from "@/components/layout/channel-picker-dialog";
@@ -31,8 +32,10 @@ import { usePremiumStatusSync } from "@/lib/store/premium";
 import {
   useCloseBehaviorSync,
   useDiscordPresenceSync,
+  useLiquidRefractionClass,
   useSettingsStore,
 } from "@/lib/store/settings";
+import { useWindowHidden } from "@/hooks/use-window-hidden";
 import {
   useAccountMetaBackfill,
   useAccountsChangedListener,
@@ -93,12 +96,17 @@ export function AppShell({ children }: { children: ReactNode }) {
   useGlobalShortcuts();
   useCloseBehaviorSync();
   useDiscordPresenceSync();
+  useLiquidRefractionClass();
   useCacheAutoClean();
   usePlaybackNotifications();
   useLastfmScrobbler();
   const mode = useLayoutStore((s) => s.mode);
   const setMode = useLayoutStore((s) => s.setMode);
   const background = useSettingsStore((s) => s.background);
+  // Minimized / hidden-to-tray: unmount the ambient background so its
+  // continuously-animating blur stack stops burning GPU while the app
+  // plays in the background. Remounts (with its own fade-in) on restore.
+  const windowHidden = useWindowHidden();
   // The player UI is hidden whenever there's no active track —
   // covers the "Nothing playing" empty state at first launch and
   // after the queue is cleared. The mode itself stays the same; the
@@ -202,7 +210,10 @@ export function AppShell({ children }: { children: ReactNode }) {
         }
       >
         <div className="relative flex h-screen w-screen flex-col overflow-hidden bg-background">
-          {background === "ambient" && <NowPlayingBackground />}
+          {background === "ambient" && !windowHidden && (
+            <NowPlayingBackground />
+          )}
+          <LiquidGlassDefs />
           {/* Custom title bar spans the full window width so the
               Windows-style min/max/close buttons land in the actual
               top-right corner, not behind the floating player. */}

@@ -48,6 +48,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { useLayoutStore, type LayoutMode } from "@/lib/store/layout";
+import { isMacOSWebview } from "@/lib/platform";
 import { openSettings } from "@/lib/store/settings-dialog";
 import { checkForUpdates } from "@/lib/updater";
 import { AboutDialog } from "@/components/layout/about-dialog";
@@ -64,18 +65,19 @@ const NAV_BTN_CLS =
 // Window controls are meaningless in a browser tab anyway.
 const IS_TAURI =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+const USES_NATIVE_MACOS_TITLEBAR = IS_TAURI && isMacOSWebview();
 
 /**
- * Custom title bar. The native window frame is disabled
- * (`decorations: false` in tauri.conf.json) so we draw the strip
- * ourselves: drag region down the middle, navigation controls on the
- * left, Windows-style min/maximize/close on the right.
+ * Cross-platform title bar. Windows and Linux keep Goosic's custom caption
+ * buttons, while macOS uses Tauri's native overlay title bar so AppKit owns
+ * the real traffic lights. The shared HTML strip still supplies navigation
+ * and a drag region on every platform.
  *
- * Clicking our close button still goes through the Rust
- * `WindowEvent::CloseRequested` handler, which either hides the window
- * into the tray (default) or quits, per the "Close button" choice on
- * the Settings page. The "Quit" item in the More menu always
- * terminates the process regardless of that setting.
+ * Both AppKit's native close control and Goosic's custom close button go
+ * through the Rust `WindowEvent::CloseRequested` handler, which either hides
+ * the window into the tray (default) or quits, per the "Close button" choice
+ * on the Settings page. The "Quit" item in the More menu always terminates the
+ * process regardless of that setting.
  */
 export function TopBar() {
   const router = useRouter();
@@ -84,7 +86,7 @@ export function TopBar() {
   const [aboutOpen, setAboutOpen] = useState(false);
 
   useEffect(() => {
-    if (!IS_TAURI) return;
+    if (!IS_TAURI || USES_NATIVE_MACOS_TITLEBAR) return;
     let cancelled = false;
     let unlisten: (() => void) | undefined;
     const win = getCurrentWindow();
@@ -119,7 +121,13 @@ export function TopBar() {
         data-tauri-drag-region
         className="relative z-30 flex h-9 shrink-0 select-none items-center"
       >
-        <div className="flex items-center gap-1 pl-2">
+        <div
+          className={
+            USES_NATIVE_MACOS_TITLEBAR
+              ? "flex items-center gap-1 pl-[76px]"
+              : "flex items-center gap-1 pl-2"
+          }
+        >
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button
@@ -196,32 +204,34 @@ export function TopBar() {
             almost anywhere in the bar to move the window. */}
         <div data-tauri-drag-region className="h-full flex-1" />
 
-        <div className="flex h-full items-center">
-          <button
-            type="button"
-            onClick={() => win().minimize()}
-            aria-label="Minimize"
-            className="flex h-full w-11 items-center justify-center text-foreground/85 transition-colors hover:bg-titlebar-hover"
-          >
-            <MinimizeGlyph />
-          </button>
-          <button
-            type="button"
-            onClick={() => win().toggleMaximize()}
-            aria-label={maximized ? "Restore" : "Maximize"}
-            className="flex h-full w-11 items-center justify-center text-foreground/85 transition-colors hover:bg-titlebar-hover"
-          >
-            {maximized ? <RestoreGlyph /> : <MaximizeGlyph />}
-          </button>
-          <button
-            type="button"
-            onClick={() => win().close()}
-            aria-label="Close"
-            className="flex h-full w-11 items-center justify-center text-foreground/85 transition-colors hover:bg-[#c42b1c] hover:text-white"
-          >
-            <CloseGlyph />
-          </button>
-        </div>
+        {!USES_NATIVE_MACOS_TITLEBAR && (
+          <div className="flex h-full items-center">
+            <button
+              type="button"
+              onClick={() => win().minimize()}
+              aria-label="Minimize"
+              className="flex h-full w-11 items-center justify-center text-foreground/85 transition-colors hover:bg-titlebar-hover"
+            >
+              <MinimizeGlyph />
+            </button>
+            <button
+              type="button"
+              onClick={() => win().toggleMaximize()}
+              aria-label={maximized ? "Restore" : "Maximize"}
+              className="flex h-full w-11 items-center justify-center text-foreground/85 transition-colors hover:bg-titlebar-hover"
+            >
+              {maximized ? <RestoreGlyph /> : <MaximizeGlyph />}
+            </button>
+            <button
+              type="button"
+              onClick={() => win().close()}
+              aria-label="Close"
+              className="flex h-full w-11 items-center justify-center text-foreground/85 transition-colors hover:bg-[#c42b1c] hover:text-white"
+            >
+              <CloseGlyph />
+            </button>
+          </div>
+        )}
       </header>
 
       <ReportIssueDialog open={reportOpen} onOpenChange={setReportOpen} />

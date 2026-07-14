@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { InfoIcon } from "lucide-react";
 import { toast } from "sonner";
+import { startLogin } from "@/lib/login";
 import {
   Dialog,
   DialogContent,
@@ -91,7 +92,7 @@ export function PremiumGateDialog() {
               {signedOut ? (
                 <Button
                   onClick={() => {
-                    invoke("start_login").catch((e) => toast.error(String(e)));
+                    startLogin().catch((e) => toast.error(String(e)));
                   }}
                 >
                   Sign in

@@ -320,7 +320,7 @@ function LyricsPopover({ state }: { state: ReturnType<typeof useLyricsView> }) {
           <span className="text-sm font-medium">Lyrics</span>
           <LyricsSourceButton state={state} />
         </header>
-        <div className="min-h-0 flex-1 overflow-hidden px-4 pb-6">
+        <div className="lyrics-viewport-fade min-h-0 flex-1 overflow-hidden px-4 pb-6">
           <LyricsBody state={state} />
         </div>
       </PopoverContent>

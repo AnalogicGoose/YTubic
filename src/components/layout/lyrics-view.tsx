@@ -113,13 +113,17 @@ export function useLyricsView(track: QueueTrack | undefined): LyricsViewState {
   };
 }
 
-export function LyricsBody({ state }: { state: LyricsViewState }) {
+export function LyricsBody({
+  state,
+  compact = false,
+}: {
+  state: LyricsViewState;
+  compact?: boolean;
+}) {
   if (!state.hasTrack) return null;
   if (state.isLoading && !state.active) {
     return (
-      <p className="px-4 py-2 text-sm text-muted-foreground">
-        Loading lyrics…
-      </p>
+      <p className="px-4 py-2 text-sm text-muted-foreground">Loading lyrics…</p>
     );
   }
   if (!state.active) {
@@ -130,9 +134,9 @@ export function LyricsBody({ state }: { state: LyricsViewState }) {
     );
   }
   if (state.active.kind === "timed") {
-    return <TimedLyrics lines={state.active.lines} />;
+    return <TimedLyrics lines={state.active.lines} compact={compact} />;
   }
-  return <PlainLyrics text={state.active.text} />;
+  return <PlainLyrics text={state.active.text} compact={compact} />;
 }
 
 /** How long before a line's actual start time we flip it to active.
@@ -177,7 +181,13 @@ function easeInOutCubic(t: number): number {
   return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 }
 
-function TimedLyrics({ lines }: { lines: TimedLine[] }) {
+function TimedLyrics({
+  lines,
+  compact,
+}: {
+  lines: TimedLine[];
+  compact: boolean;
+}) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const rafRef = useRef<number | null>(null);
   const position = usePlaybackStore((s) => s.position);
@@ -200,17 +210,14 @@ function TimedLyrics({ lines }: { lines: TimedLine[] }) {
       container.scrollTop = 0;
       return;
     }
-    const el = container.querySelector<HTMLElement>(
-      `[data-line-idx="${idx}"]`,
-    );
+    const el = container.querySelector<HTMLElement>(`[data-line-idx="${idx}"]`);
     if (!el) {
       container.scrollTop = 0;
       return;
     }
     const cRect = container.getBoundingClientRect();
     const eRect = el.getBoundingClientRect();
-    const elTopWithinContent =
-      eRect.top - cRect.top + container.scrollTop;
+    const elTopWithinContent = eRect.top - cRect.top + container.scrollTop;
     const target =
       idx === 0
         ? 0
@@ -278,7 +285,7 @@ function TimedLyrics({ lines }: { lines: TimedLine[] }) {
           // first line — that way the first line stays crisp at the
           // top of the column while the song hasn't started or is on
           // line 0.
-          activeIdx >= 1 && "lyrics-mask",
+          activeIdx >= 1 && (compact ? "lyrics-mask-compact" : "lyrics-mask"),
         )}
       >
         {lines.map((line, i) => {
@@ -327,18 +334,25 @@ function TimedLyrics({ lines }: { lines: TimedLine[] }) {
           When the very first line is active it sits at viewport top
           (no above-center offset), so we fade the overlay out to keep
           the first line crisp. */}
-      <div
-        aria-hidden
-        className="lyrics-blur-overlay pointer-events-none absolute inset-x-0 top-0 h-[26%] transition-opacity duration-500 ease-in-out"
-        style={{ opacity: activeIdx <= 0 ? 0 : 1 }}
-      />
+      {!compact && (
+        <div
+          aria-hidden
+          className="lyrics-blur-overlay pointer-events-none absolute inset-x-0 top-0 h-[26%] transition-opacity duration-500 ease-in-out"
+          style={{ opacity: activeIdx <= 0 ? 0 : 1 }}
+        />
+      )}
     </div>
   );
 }
 
-function PlainLyrics({ text }: { text: string }) {
+function PlainLyrics({ text, compact }: { text: string; compact: boolean }) {
   return (
-    <div className="lyrics-mask app-scroll h-full overflow-y-auto whitespace-pre-wrap px-2 pt-0 pb-12 text-lg font-medium leading-relaxed text-foreground/90">
+    <div
+      className={cn(
+        "app-scroll h-full overflow-y-auto whitespace-pre-wrap px-2 pt-0 pb-12 text-lg font-medium leading-relaxed text-foreground/90",
+        compact ? "lyrics-mask-compact" : "lyrics-mask",
+      )}
+    >
       {text}
     </div>
   );

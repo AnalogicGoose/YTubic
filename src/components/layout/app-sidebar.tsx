@@ -73,6 +73,7 @@ import {
   type AccountSummary,
 } from "@/lib/store/accounts";
 import { cn } from "@/lib/utils";
+import { startLogin } from "@/lib/login";
 import { APP_ICON, APP_NAME } from "@/lib/branding";
 
 const NAV_ITEMS = [
@@ -404,7 +405,7 @@ function SidebarSignInButton() {
         <Button
           title="Sign in"
           onClick={() => {
-            invoke("start_login").catch((e) =>
+            startLogin().catch((e) =>
               toast.error(`Sign-in failed: ${String(e)}`),
             );
           }}
@@ -504,7 +505,7 @@ function UserProfile() {
   // query for us.
   const addAccount = async () => {
     try {
-      await invoke("start_login");
+      await startLogin();
     } catch (e) {
       toast.error(`Sign-in failed: ${String(e)}`);
     }

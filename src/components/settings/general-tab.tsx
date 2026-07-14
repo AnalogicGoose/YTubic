@@ -18,6 +18,7 @@ import { Switch } from "@/components/ui/switch";
 import { Group, SettingRow, TabPane } from "@/components/settings/primitives";
 import { usePlaybackStore } from "@/lib/store/playback";
 import { useSettingsStore } from "@/lib/store/settings";
+import { startLogin } from "@/lib/login";
 
 export function GeneralTab() {
   return (
@@ -63,7 +64,7 @@ function AccountGroup() {
   const signIn = async () => {
     setSigningIn(true);
     try {
-      await invoke("start_login");
+      await startLogin();
     } catch (e) {
       setSigningIn(false);
       toast.error(String(e));

@@ -33,6 +33,11 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { Slider } from "@/components/ui/slider";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { PLAYER_GLASS_SURFACE_CLASS } from "@/components/ui/glass-surface";
 import { Thumbnail } from "@/components/shared/thumbnail";
 import { LikeDislikeButtons } from "@/components/shared/like-buttons";
@@ -288,7 +293,6 @@ export function VolumeControl({
   );
   const setVolume = usePlaybackStore((s) => s.setVolume);
   const toggleMute = usePlaybackStore((s) => s.toggleMute);
-  const [open, setOpen] = useState(false);
 
   const Icon =
     muted || volume === 0
@@ -300,28 +304,9 @@ export function VolumeControl({
           : Volume2Icon;
   const pct = muted ? 0 : Math.round(volume * 100);
 
-  // Horizontal: slider sits to the right of the speaker icon (right
-  // card variant — there's room beside the button).
-  // Vertical: slider pops upward (bottom bar — below the button is
-  // the page edge, so the popup has to grow up).
-  // Padding on the popup is invisible but counts toward the parent's
-  // mouseleave hit-test, so the slider doesn't snap shut the moment
-  // the cursor slips a couple px off the visible bar.
-  const popupClass =
-    direction === "vertical"
-      ? "absolute bottom-full left-1/2 z-10 flex -translate-x-1/2 flex-col items-center gap-1 px-3 pb-2 transition-opacity duration-150"
-      : "absolute left-full top-1/2 z-10 flex -translate-y-1/2 items-center gap-0 py-3 pl-1 transition-opacity duration-150";
-
   return (
     <div
-      // Two invisible 8px strips (above and below the speaker button)
-      // extend the container's hover hit-zone without overlapping the
-      // button itself — overlapping it would steal its `:hover` state.
-      // Together with the popup's own padding, the cursor gets a
-      // comfortable grace area for traveling between icon and slider.
-      className="relative flex items-center before:absolute before:-top-2 before:inset-x-0 before:h-2 before:content-[''] after:absolute after:-bottom-2 after:inset-x-0 after:h-2 after:content-['']"
-      onMouseEnter={() => setOpen(true)}
-      onMouseLeave={() => setOpen(false)}
+      className="relative flex items-center"
       onWheel={(e) => {
         // Scroll wheel adjusts volume in 5% increments. Wheel-up
         // raises, wheel-down lowers. Unmutes on any change so the
@@ -334,62 +319,81 @@ export function VolumeControl({
         setVolume(next);
       }}
     >
-      <Button
-        variant="ghost"
-        size="icon"
-        aria-label={muted ? "Unmute" : "Mute"}
-        onClick={toggleMute}
-      >
-        <AnimatePresence mode="popLayout" initial={false}>
-          <motion.span
-            key={Icon.displayName ?? Icon.name}
-            initial={{ opacity: 0, scale: 0.7 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.7 }}
-            transition={{ duration: 0.12 }}
-            className="flex items-center justify-center"
+      <Popover>
+        <PopoverTrigger asChild>
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label="Open volume controls"
           >
-            <Icon />
-          </motion.span>
-        </AnimatePresence>
-      </Button>
-      <div
-        className={cn(
-          popupClass,
-          open ? "opacity-100" : "pointer-events-none opacity-0",
-        )}
-      >
-        {direction === "vertical" ? (
-          <div className="flex w-12 flex-col items-center gap-2 rounded-md border border-hairline bg-popover px-4 py-3 text-popover-foreground shadow-lg">
-            <span className="text-xs font-medium tabular-nums text-foreground">
-              {pct}
-            </span>
+            <AnimatePresence mode="popLayout" initial={false}>
+              <motion.span
+                key={Icon.displayName ?? Icon.name}
+                initial={{ opacity: 0, scale: 0.7 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.7 }}
+                transition={{ duration: 0.12 }}
+                className="flex items-center justify-center"
+              >
+                <Icon />
+              </motion.span>
+            </AnimatePresence>
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent
+          side={direction === "vertical" ? "top" : "right"}
+          align="center"
+          sideOffset={8}
+          onOpenAutoFocus={(event) => event.preventDefault()}
+          className={cn(
+            "rounded-full",
+            direction === "vertical"
+              ? "flex w-14 flex-col items-center gap-3 px-3 py-4"
+              : "flex w-44 items-center gap-3 px-4 py-3",
+          )}
+        >
+          {direction === "vertical" ? (
+            <>
+              <span className="text-xs font-medium tabular-nums text-foreground">
+                {pct}
+              </span>
+              <Slider
+                orientation="vertical"
+                value={[pct]}
+                max={100}
+                step={1}
+                className="h-20 min-h-0 [&_[data-slot=slider-track]]:bg-black/15 dark:[&_[data-slot=slider-track]]:bg-white/20"
+                aria-label="Volume"
+                onValueChange={([v]) => setVolume(v / 100)}
+              />
+            </>
+          ) : (
             <Slider
-              orientation="vertical"
               value={[pct]}
               max={100}
               step={1}
-              className="h-16 min-h-0 [&_[data-slot=slider-track]]:bg-white/20"
+              className="min-w-0 flex-1 [&_[data-slot=slider-track]]:bg-black/15 dark:[&_[data-slot=slider-track]]:bg-white/20"
               aria-label="Volume"
               onValueChange={([v]) => setVolume(v / 100)}
             />
+          )}
+          <div className={cn("flex items-center", direction === "horizontal" && "gap-2")}>
+            <button
+              type="button"
+              onClick={toggleMute}
+              aria-label={muted ? "Unmute" : "Mute"}
+              className="flex size-7 shrink-0 items-center justify-center rounded-full text-black/55 hover:text-foreground dark:text-white/65"
+            >
+              <Icon className="size-4" />
+            </button>
+            {direction === "horizontal" && (
+              <span className="w-7 text-right text-xs font-medium tabular-nums text-foreground">
+                {pct}
+              </span>
+            )}
           </div>
-        ) : (
-          <>
-            <Slider
-              value={[pct]}
-              max={100}
-              step={1}
-              className="w-16 [&_[data-slot=slider-track]]:bg-white/20"
-              aria-label="Volume"
-              onValueChange={([v]) => setVolume(v / 100)}
-            />
-            <span className="w-7 text-right text-xs font-medium tabular-nums text-foreground">
-              {pct}
-            </span>
-          </>
-        )}
-      </div>
+        </PopoverContent>
+      </Popover>
     </div>
   );
 }
@@ -660,7 +664,10 @@ export function PlayerBar({
                 column. Lives inside the same motion.div as the cover
                 so the whole non-queue body crossfades as one unit. */}
               <div className="flex min-h-0 flex-1 flex-col px-3">
-                <LyricsBody state={lyricsState} />
+                <LyricsBody
+                  state={lyricsState}
+                  compact={variant === "floating"}
+                />
               </div>
             </motion.div>
           )}

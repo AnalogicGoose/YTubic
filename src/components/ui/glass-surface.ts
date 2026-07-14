@@ -9,8 +9,13 @@ const BASE_SURFACE_CLASS =
 
 const blurRenders = !isLinuxWebview()
 
+// Where blur actually composites (Windows WebView2, macOS WKWebView), the
+// material is the `.liquid-glass` class in index.css — an Apple Liquid
+// Glass approximation (blur + saturation lift, specular rim, edge-lens
+// glow). True refraction needs `backdrop-filter: url(#svg)` displacement,
+// which WebKit doesn't support, so this is as close as the webview gets.
 export const GLASS_SURFACE_CLASS = blurRenders
-  ? `${BASE_SURFACE_CLASS} backdrop-blur-[16px] supports-[backdrop-filter]:bg-white/70 dark:supports-[backdrop-filter]:bg-[rgba(26,26,26,0.72)]`
+  ? "relative isolate liquid-glass text-[#1a1a1a] dark:text-[#f5f5f5]"
   : BASE_SURFACE_CLASS
 
 // The player surface is meant to read as a much lighter touch (10% tint)
@@ -18,6 +23,9 @@ export const GLASS_SURFACE_CLASS = blurRenders
 // actually softening whatever's behind it. Without it, 10% opacity is
 // close to invisible and the content behind bleeds through sharp, so this
 // falls back to the same opaque base as every other glass surface instead.
+// The Tailwind bg-* utilities override .liquid-glass's background-color
+// (utilities layer wins over the base-layer class), keeping the documented
+// 10% player tint.
 export const PLAYER_GLASS_SURFACE_CLASS = blurRenders
-  ? `${GLASS_SURFACE_CLASS} bg-white/10 supports-[backdrop-filter]:bg-white/10 dark:bg-[#1a1a1a]/10 dark:supports-[backdrop-filter]:bg-[#1a1a1a]/10`
+  ? `${GLASS_SURFACE_CLASS} bg-white/10 dark:bg-[#1a1a1a]/10`
   : BASE_SURFACE_CLASS

@@ -28,6 +28,8 @@ mod appid;
 mod discord;
 mod lastfm;
 mod media;
+#[cfg(target_os = "macos")]
+mod native_glass;
 mod secure_store;
 mod ytdlp;
 
@@ -128,9 +130,16 @@ fn account_webview_dir(app: &tauri::AppHandle, id: &str) -> PathBuf {
     accounts_dir(app).join(id).join("webview")
 }
 
-/// Chrome UA the login and refresh WebViews both present to Google. Kept
-/// identical so the session Google issues to the login window is the
-/// same one the refresh window later renews.
+/// Safari UA for macOS WKWebView. Google's sign-in rejects the default
+/// embedded-WebKit identity, while the native Safari identity is the same
+/// supported pattern used by Kaset's macOS YouTube Music login.
+#[cfg(target_os = "macos")]
+const YT_LOGIN_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) \
+     AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15";
+
+/// Chrome UA the Windows WebView2 login and refresh WebViews present to
+/// Google. Kept identical so the issued session can be refreshed later.
+#[cfg(not(target_os = "macos"))]
 const YT_LOGIN_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
      (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36";
 
@@ -686,9 +695,12 @@ async fn start_login(app: tauri::AppHandle) -> Result<(), String> {
     // on success.
     let account_dir = accounts_dir(&app).join(&account_id);
 
-    let url = "https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fmusic.youtube.com%2F"
-        .parse::<tauri::Url>()
-        .map_err(|e| e.to_string())?;
+    #[cfg(target_os = "macos")]
+    let login_url = "https://accounts.google.com/ServiceLogin?service=youtube&uilel=3&passive=true&continue=https%3A%2F%2Fwww.youtube.com%2Fsignin%3Faction_handle_signin%3Dtrue%26app%3Ddesktop%26hl%3Den%26next%3Dhttps%253A%252F%252Fmusic.youtube.com%252F";
+    #[cfg(not(target_os = "macos"))]
+    let login_url = "https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fmusic.youtube.com%2F";
+
+    let url = login_url.parse::<tauri::Url>().map_err(|e| e.to_string())?;
 
     let win = WebviewWindowBuilder::new(&app, "login", WebviewUrl::External(url))
         .title("Sign in - accounts.google.com")
@@ -1182,13 +1194,25 @@ async fn open_player_window(
     // + gap (12) + controls (~48) + p-3 bottom (12) ≈ 558. Lyrics
     // and the bottom button row sit below and graciously collapse
     // (lyrics is `flex-1 min-h-0`) when there isn't room.
+    #[cfg(target_os = "macos")]
+    let player_url = format!(
+        "index.html?floating-player=1&native-player-material={}",
+        native_glass::material_name()
+    );
+    #[cfg(not(target_os = "macos"))]
+    let player_url = "index.html?floating-player=1".to_owned();
+
     let win = WebviewWindowBuilder::new(
         &app,
         "player",
-        WebviewUrl::App("index.html?floating-player=1".into()),
+        WebviewUrl::App(player_url.into()),
     )
     .title("Goosic — player")
     .decorations(false)
+    // The web surface clips itself to the outer 16px window radius. A transparent
+    // native window lets those clipped corners reveal the desktop instead of
+    // the WebView's otherwise rectangular black backing layer.
+    .transparent(true)
     .inner_size(360.0, 720.0)
     .min_inner_size(320.0, 560.0)
     .resizable(true)
@@ -1204,6 +1228,8 @@ async fn open_player_window(
     .additional_browser_args(APP_WEBVIEW_ARGS)
     .build()
     .map_err(|e| e.to_string())?;
+    #[cfg(target_os = "macos")]
+    native_glass::install(&win)?;
     // Dev builds: orange taskbar icon, same as the main window.
     #[cfg(debug_assertions)]
     let _ = win.set_icon(runtime_icon(&app));

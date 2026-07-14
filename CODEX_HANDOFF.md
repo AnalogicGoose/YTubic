@@ -4,9 +4,9 @@
 > engineering, UI, release, and troubleshooting context for this repository.
 >
 > Last verified: **2026-07-13**
-> Current app version: **0.4.3**
-> Current `main`: **v0.4.2 release source plus the prepared v0.4.3 universal macOS release work**
-> Latest public release: <https://github.com/AnalogicGoose/Goosic/releases/tag/v0.4.2>
+> Current app version: **0.4.4**
+> Current `main`: **v0.4.3 release source plus the prepared v0.4.4 UI/native-material release work**
+> Latest public release: <https://github.com/AnalogicGoose/Goosic/releases/tag/v0.4.3>
 
 ## 1. New-session quick start
 
@@ -85,6 +85,8 @@ Current major capabilities:
 - Right-side, bottom, and separate floating player layouts.
 - Synced lyrics from LRCLIB, Musixmatch, and Genius.
 - Multiple YouTube account/channel support.
+- Google/YouTube sign-in on Windows WebView2 and macOS WKWebView, with
+  platform-native browser identities and persistent per-account profiles.
 - Local stream proxy and managed yt-dlp.
 - Windows SMTC/media keys, tray, autostart, notifications, and single instance.
 - Last.fm scrobbling and optional love synchronization.
@@ -142,6 +144,13 @@ The same Vite bundle serves two native windows:
 - The main window uses TanStack Router and `AppShell`.
 - The floating player detects its window label and renders
   `FloatingPlayerApp` instead of the router.
+- On macOS, `src-tauri/src/native_glass.rs` wraps the floating player's Tauri
+  content view in an AppKit-owned material host. macOS 26+ uses
+  `NSGlassEffectView` with the WKWebView assigned as its official
+  `contentView`; older macOS uses an `NSVisualEffectView` HUD fallback. The
+  URL's `native-player-material` flag tells React to keep its web surface
+  transparent. Do not restore CSS blur/ambient art on that native-backed
+  surface or it will obscure Liquid Glass.
 
 The two windows are separate JavaScript contexts. Cross-window behavior uses
 Tauri events plus storage rehydration. Do not assume a Zustand mutation in one
@@ -290,9 +299,51 @@ the content/album background remains visible beneath it.
 - The bottom player is an overlay above content; content remains visible under
   the translucent blur.
 - The right/floating player and bottom player should share the same background
-  and glass material decisions.
+  and glass material decisions where the platform implementation permits it.
+  The first native Liquid Glass pass intentionally applies only to the
+  standalone macOS floating-player window; the in-main-window right and bottom
+  variants remain web glass until they are extracted into native surfaces.
 - Volume controls/popovers must not create a visually conflicting second glass
-  material.
+  material. `VolumeControl` intentionally keeps the original compact pill
+  silhouette: a vertical pill above the bottom-player button and a horizontal
+  pill beside the right/floating-player button. Both use the shared glass
+  material and must render through portaled `PopoverContent`; an absolutely
+  positioned child is clipped by the player's overflow and paints under its
+  controls.
+
+### Desktop selection behavior
+
+- The application root disables text selection so labels, headings, lyrics,
+  cards, and player metadata cannot be accidentally highlighted like a web
+  document. Inputs, textareas, and explicit editable regions opt back into
+  text selection; preserve that exception for search and settings forms.
+- Outer native windows use a dedicated **16px Figma radius**; this does not
+  change the internal 34px card/menu geometry. macOS/Linux windows use
+  transparent backing surfaces and clip the React root through
+  `native-rounded-window`; the floating window's full-size surface also uses
+  16px. Keep those clips and the Tauri `transparent` flags in sync or black
+  square pixels return outside the UI.
+- The macOS main window uses the platform override in
+  `src-tauri/tauri.macos.conf.json`: native decorations, an overlay title bar,
+  hidden title, and real AppKit traffic lights. `TopBar` reserves their left
+  inset and must not render the Windows caption buttons on macOS. Windows and
+  Linux retain the custom right-side caption controls.
+- **macOS 26 (Tahoe) WKWebView black-window trap (found 2026-07-14):** putting
+  `border-radius` + `overflow: hidden` on `#root` (the `native-rounded-window`
+  clip) makes WKWebView's compositor drop the entire window's output. The app
+  keeps running — JS executes, modules load, audio streams — but the window
+  paints solid black (or, with `transparent: true`, garbled tiny content).
+  Therefore `usesRoundedNativeWindow()` in `src/lib/platform.ts` is
+  **Linux-only**. macOS needs no CSS clip: AppKit rounds decorated windows
+  natively, and the floating player gets its 16px radius from
+  `native_glass.rs`. The macOS main window also ships `transparent: false`
+  with an opaque `backgroundColor` — do not reintroduce the CSS root clip or
+  window transparency on macOS without verifying on a Tahoe machine.
+- The standalone macOS floating player is an AppKit material host: native
+  Liquid Glass on macOS 26+, with native visual-effect fallback on older macOS.
+  Its outer radius is the same 16px window token. Keep its WKWebView transparent
+  and pass it to `NSGlassEffectView.contentView`; adding an effect as an
+  unrelated subview does not provide Apple's supported Liquid Glass behavior.
 
 ### Artist navigation
 
@@ -319,6 +370,10 @@ than copied source code.
   card.
 - Keep the lyrics blur overlay, safe zone, and GPU text-layer comments in
   `src/index.css`; they document fixes for clipped/soft/jumping lyric lines.
+- The short floating-player viewport intentionally uses
+  `lyrics-mask-compact` and omits the compositor-heavy blur overlay. Reusing
+  the percentage mask/blur stack there cuts wrapped lines and can paint a hard
+  rectangular band in WKWebView.
 
 ## 8. Dynamic album mesh experiment
 
@@ -364,6 +419,43 @@ frost overlay keeps only a smaller finishing backdrop blur.
 **Do not move the primary blur back to only `.album-mesh-frost`.** Dev testing
 alone will not catch the regression. Any mesh change must be checked with a
 production/Tauri build.
+
+## 8b. Liquid-glass material and Windows refraction experiment
+
+All menus, popovers, dropdowns, and player surfaces share one material:
+`GLASS_SURFACE_CLASS` in `src/components/ui/glass-surface.ts`, backed by the
+`.liquid-glass` class in `src/index.css` (blur 26px + saturate + outline +
+drop shadow — the user explicitly removed inset specular/glow highlights;
+do not add them back).
+
+On top of that, **Windows only** gets true backdrop refraction as an
+experiment (Settings → Experiments → "Liquid glass refraction",
+`liquidGlassRefraction` in `src/lib/store/settings.ts`, default on):
+
+- `useLiquidRefractionClass()` toggles `liquid-refract` on `<html>` only
+  when `isWindowsWebview()` — Chromium/WebView2 is the only engine that
+  renders SVG filters inside `backdrop-filter`. WebKit (macOS) ignores
+  `backdrop-filter: url()` entirely ([WebKit bug 245510]), so macOS always
+  keeps the classic blur material and the Experiments row is hidden there.
+- The lens filter lives in
+  `src/components/layout/liquid-glass-defs.tsx` (`#liquid-glass-lens`,
+  feImage displacement map + feDisplacementMap). It must be mounted once
+  per window — AppShell and FloatingPlayerApp both render it because they
+  are separate documents.
+- CSS: `.liquid-refract .liquid-glass` in `src/index.css`.
+- This has NOT been visually verified on real Windows hardware yet — only
+  in a Chromium harness. Check it on a Windows machine before release.
+
+## 8c. Background GPU saver (minimized/hidden windows)
+
+`useWindowHidden()` in `src/hooks/use-window-hidden.ts` reports when a
+window is minimized or hidden to tray (document.visibilitychange +
+`tauri://resize` → `isMinimized()`). AppShell and FloatingPlayerApp unmount
+`NowPlayingBackground` while hidden, killing the album mesh's continuously
+animating blur stack so a backgrounded app costs near-zero GPU while audio
+keeps playing. The background remounts (with its normal fade-in) on
+restore. Do not "optimize" this into opacity/visibility toggles — the
+compositor keeps animating hidden layers; unmounting is the point.
 
 ## 9. Branding
 
@@ -519,6 +611,22 @@ macOS jobs are green and all expected assets are in the public release.
 
 ## 13. Development commands
 
+### Node version requirement (macOS trap)
+
+Use **Node 20 or 22**, matching CI (`node-version: 20` in the workflows).
+**Node 24 breaks `pnpm dev` / `pnpm tauri dev`:** Vite hangs silently before
+printing anything — importing `@tanstack/router-plugin/vite` deadlocks inside
+Node 24's ESM/CJS module evaluation, so Tauri loops forever on
+"Waiting for your frontend dev server to start on http://localhost:1420/".
+Verified 2026-07-14 on macOS with Node v24.14.1 (hangs) vs Node v22.23.1 (works).
+
+On the user's MacBook, Homebrew `node@22` is installed but keg-only. Prefix it
+before running anything:
+
+```bash
+export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
+```
+
 Install dependencies:
 
 ```powershell
@@ -595,6 +703,14 @@ first launch. Replace this with Apple signing/notarization secrets when they
 become available. Account cookie jars are AES-256-GCM encrypted and their key
 is stored in the native login Keychain; do not restore plaintext passthrough on
 macOS.
+
+The macOS login follows the native pattern proven by Kaset: an embedded
+`WKWebView` uses a Safari 17/macOS user agent and Google's YouTube desktop
+continuation URL (`www.youtube.com/signin` → `music.youtube.com`). Do not reuse
+the Windows Chrome user agent on macOS; Google rejects that mismatched embedded
+identity as an insecure browser. The login and hidden session keeper share the
+same persistent per-account WebKit data directory, and captured cookies are
+still encrypted through the Keychain-backed `secure_store` path.
 
 ## 14. Test and review matrix
 
@@ -689,6 +805,8 @@ persisted and synchronized across native windows.
 
 ## 18. Recent release history
 
+- `v0.4.4` — pending release for the macOS native window/login improvements,
+  native Liquid Glass floating player, and cross-platform UI polish.
 - `v0.4.3` — adds a universal Apple Silicon/Intel macOS DMG and updater
   artifact, plus native Keychain-backed account-cookie encryption. The initial
   macOS build is ad-hoc signed until Apple Developer credentials are provided.
@@ -713,14 +831,13 @@ persisted and synchronized across native windows.
 
 At the time this document was last refreshed:
 
-- `v0.4.2` is public; its Windows job passed and its Linux job was still
-  building when v0.4.3 preparation began.
-- Prepared v0.4.3 adds the sequential universal macOS GitHub Actions job,
-  ad-hoc signing, DMG/updater output, and native Keychain-backed cookie-key
-  storage. It has no Apple certificate/notarization credentials yet.
-- The v0.4.3 changes passed 53/53 Vitest tests, frontend production
-  build/typecheck, Rust check, lint with the same eight historical warnings and
-  zero errors, and a local optimized Windows Tauri build.
+- `v0.4.3` is public with Windows, Linux, and universal macOS artifacts.
+- `v0.4.4` is prepared for release. It includes the Safari-identified macOS
+  WKWebView login flow, transparent 16px native windows and traffic lights,
+  AppKit-backed Liquid Glass for the standalone floating player on macOS 26+
+  (`NSVisualEffectView` fallback on older releases), plus the related UI polish
+  and performance safeguards. It has no Apple certificate/notarization
+  credentials yet, so macOS remains ad-hoc signed.
 
 When this snapshot becomes stale, update this section, the header version, and
 the recent release history as part of the next release.

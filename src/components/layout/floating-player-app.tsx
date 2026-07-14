@@ -10,10 +10,15 @@ import { PLAYER_GLASS_SURFACE_CLASS } from "@/components/ui/glass-surface";
 import { PlayerBar } from "@/components/layout/player-bar";
 import { FloatingPlayerSyncReceiver } from "@/components/layout/floating-player-sync";
 import { NowPlayingBackground } from "@/components/layout/now-playing-background";
+import { LiquidGlassDefs } from "@/components/layout/liquid-glass-defs";
 import { initFloatingPlaybackBridge } from "@/lib/store/playback";
 import { initFloatingTrackSourceBridge } from "@/lib/store/track-source";
 import { useLayoutStore } from "@/lib/store/layout";
-import { useSettingsStore } from "@/lib/store/settings";
+import {
+  useLiquidRefractionClass,
+  useSettingsStore,
+} from "@/lib/store/settings";
+import { useWindowHidden } from "@/hooks/use-window-hidden";
 import { cn } from "@/lib/utils";
 import { queryClient } from "@/lib/query-client";
 
@@ -37,6 +42,15 @@ export default function FloatingPlayerApp() {
   // cross-window `storage` listener in the settings store keeps it
   // live when toggled over there.
   const background = useSettingsStore((s) => s.background);
+  useLiquidRefractionClass();
+  // Same GPU-saving rule as the main window: no ambient background while
+  // this window is minimized or hidden.
+  const windowHidden = useWindowHidden();
+  const nativeMaterial = new URLSearchParams(window.location.search).get(
+    "native-player-material",
+  );
+  const hasNativeMaterial =
+    nativeMaterial === "liquid-glass" || nativeMaterial === "visual-effect";
   return (
     <ThemeProvider
       attribute="class"
@@ -55,10 +69,14 @@ export default function FloatingPlayerApp() {
           <div
             className={cn(
               PLAYER_GLASS_SURFACE_CLASS,
-              "relative flex h-screen w-screen flex-col overflow-hidden rounded-[34px] border",
+              "relative flex h-screen w-screen flex-col overflow-hidden rounded-[16px] border",
+              hasNativeMaterial && "native-player-material",
             )}
           >
-            {background === "ambient" && <NowPlayingBackground />}
+            {!hasNativeMaterial && background === "ambient" && !windowHidden && (
+              <NowPlayingBackground />
+            )}
+            <LiquidGlassDefs />
             <FloatingPlayerSyncReceiver />
             <FloatingTitleBar />
             <main className="relative flex-1">

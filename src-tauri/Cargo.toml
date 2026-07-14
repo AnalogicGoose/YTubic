@@ -1,6 +1,6 @@
 [package]
 name = "goosic"
-version = "0.4.3"
+version = "0.4.4"
 description = "Goosic — fast, responsive YouTube Music desktop client"
 authors = ["George Shyshov"]
 license = "GPL-3.0-only"
@@ -19,7 +19,14 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri = { version = "2", features = [
+    "tray-icon",
+    "image-png",
+    # Required for genuinely transparent WKWebView windows on macOS. Goosic
+    # ships directly (not through the Mac App Store), so the private-API
+    # restriction does not conflict with the current distribution channel.
+    "macos-private-api",
+] }
 tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-window-state = "2"
@@ -98,6 +105,18 @@ aes-gcm = "0.10"
 # encrypted locally because keyrings are intended for small secrets.
 keyring = { version = "3", features = ["apple-native"] }
 aes-gcm = "0.10"
+# Native material host for the standalone player. NSGlassEffectView is used
+# when the runtime provides macOS 26 Liquid Glass; older systems fall back to
+# NSVisualEffectView without changing the web player implementation.
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = [
+    "NSGlassEffectView",
+    "NSResponder",
+    "NSView",
+    "NSVisualEffectView",
+    "NSWindow",
+] }
+objc2-foundation = { version = "0.3", features = ["NSGeometry"] }
 
 [dev-dependencies]
 # ServiceExt::oneshot for the stream-server routing test.
