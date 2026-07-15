@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "@tanstack/react-router";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -114,6 +114,20 @@ export function AppShell({ children }: { children: ReactNode }) {
   const hasTrack = usePlaybackStore(
     (s) => s.index >= 0 && s.index < s.queue.length,
   );
+  const [fullPlayerOpen, setFullPlayerOpen] = useState(false);
+
+  useEffect(() => {
+    if (!hasTrack) setFullPlayerOpen(false);
+  }, [hasTrack]);
+
+  useEffect(() => {
+    if (!fullPlayerOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setFullPlayerOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [fullPlayerOpen]);
   // Set when we close the floating window programmatically (queue emptied)
   // so the player-window-closed handler doesn't mistake it for the user
   // clicking X and revert the persisted floating layout preference.
@@ -210,7 +224,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         }
       >
         <div className="relative flex h-screen w-screen flex-col overflow-hidden bg-background">
-          {background === "ambient" && !windowHidden && (
+          {background === "ambient" && !windowHidden && !fullPlayerOpen && (
             <NowPlayingBackground />
           )}
           <LiquidGlassDefs />
@@ -253,11 +267,33 @@ export function AppShell({ children }: { children: ReactNode }) {
               >
                 {children}
               </main>
-              {mode === "bottom" && hasTrack && <PlayerBarBottom />}
+              {mode === "bottom" && hasTrack && !fullPlayerOpen && (
+                <PlayerBarBottom
+                  onCoverActivate={() => setFullPlayerOpen(true)}
+                />
+              )}
             </div>
-            {mode === "right" && hasTrack && <PlayerBar />}
-            {mode === "floating" && hasTrack && <FloatingPlayerSync />}
+            {mode === "right" && hasTrack && !fullPlayerOpen && (
+              <PlayerBar onCoverActivate={() => setFullPlayerOpen(true)} />
+            )}
+            {mode === "floating" && hasTrack && !fullPlayerOpen && (
+              <FloatingPlayerSync />
+            )}
           </div>
+          {fullPlayerOpen && hasTrack ? (
+            <div
+              role="dialog"
+              aria-label="Full-screen player"
+              aria-modal="true"
+              className="absolute inset-x-0 bottom-0 top-(--titlebar-h) z-40 overflow-hidden bg-background"
+            >
+              <NowPlayingBackground />
+              <PlayerBar
+                variant="fullscreen"
+                onRequestClose={() => setFullPlayerOpen(false)}
+              />
+            </div>
+          ) : null}
           <DragSnapOverlay />
           <SettingsDialog />
           <PremiumGateDialog />

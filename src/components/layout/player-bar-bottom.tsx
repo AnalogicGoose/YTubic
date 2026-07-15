@@ -57,7 +57,11 @@ import { usePlaybackStore, currentTrack } from "@/lib/store/playback";
  * cluster sits dead-center because the left and right wing sections
  * both use `flex-1`.
  */
-export function PlayerBarBottom() {
+export function PlayerBarBottom({
+  onCoverActivate,
+}: {
+  onCoverActivate?: () => void;
+}) {
   const {
     playing,
     status,
@@ -91,7 +95,9 @@ export function PlayerBarBottom() {
   const [scrub, setScrub] = useState<number | null>(null);
   const iTunesCover = useITunesCover(track);
   const lyricsState = useLyricsView(track);
-  const { onPointerDown: onCoverPointerDown } = usePlayerCoverDrag();
+  const { onPointerDown: onCoverPointerDown } = usePlayerCoverDrag({
+    onActivate: onCoverActivate,
+  });
 
   const hasTrack = !!track;
   // See player-bar.tsx — spinner only while the user has actually
@@ -139,7 +145,19 @@ export function PlayerBarBottom() {
           <div className="flex min-w-0 flex-1 items-center gap-3">
             <div
               onPointerDown={onCoverPointerDown}
-              className="shrink-0 touch-none select-none cursor-grab active:cursor-grabbing"
+              role={onCoverActivate ? "button" : undefined}
+              aria-label={
+                onCoverActivate ? "Open full-screen player" : undefined
+              }
+              tabIndex={onCoverActivate ? 0 : undefined}
+              onKeyDown={(event) => {
+                if (!onCoverActivate) return;
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  onCoverActivate();
+                }
+              }}
+              className="shrink-0 touch-none select-none cursor-grab active:cursor-grabbing focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
             >
               {track ? (
                 <Thumbnail

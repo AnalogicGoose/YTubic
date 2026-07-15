@@ -273,16 +273,33 @@
 
   /* Windows-only experiment (Settings → Experiments → Liquid glass
      refraction): upgrade every glass surface to TRUE backdrop refraction by
-     running the backdrop through the SVG lens in liquid-glass-defs.tsx.
+     running the backdrop through a per-surface SVG lens generated in
+     liquid-glass-defs.tsx. ResizeObserver keeps the displacement image sized
+     to the real panel, preserving the convex bezel and parallax while menus
+     open and the player/window resizes.
      Chromium/WebView2 is the only engine that renders SVG filters inside
      backdrop-filter — WebKit ignores the url() term — so the root class is
      only ever applied on Windows (useLiquidRefractionClass in settings.ts).
      macOS keeps the classic blur material above. */
   .liquid-refract .liquid-glass {
-    -webkit-backdrop-filter: url(#liquid-glass-lens) blur(26px)
-      saturate(190%) brightness(1.04);
-    backdrop-filter: url(#liquid-glass-lens) blur(26px) saturate(190%)
-      brightness(1.04);
+    -webkit-backdrop-filter: var(
+      --liquid-glass-filter,
+      blur(26px) saturate(190%) brightness(1.04)
+    );
+    backdrop-filter: var(
+      --liquid-glass-filter,
+      blur(26px) saturate(190%) brightness(1.04)
+    );
+  }
+
+  /* Kube music-player parameter: Glass Background Opacity = 0.60. Scope it
+     to the Windows refraction experiment so disabling the toggle restores the
+     established classic-player tint (10%). */
+  .liquid-refract .liquid-glass-player {
+    background-color: rgba(255, 255, 255, 0.6) !important;
+  }
+  .dark.liquid-refract .liquid-glass-player {
+    background-color: rgba(34, 34, 34, 0.6) !important;
   }
 }
 

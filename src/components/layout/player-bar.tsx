@@ -14,6 +14,7 @@ import {
   MusicIcon,
   VideoIcon,
   RadioIcon,
+  Minimize2Icon,
 } from "lucide-react";
 import { QueueBody, QueueToggleButton } from "@/components/layout/queue-panel";
 import {
@@ -321,11 +322,7 @@ export function VolumeControl({
     >
       <Popover>
         <PopoverTrigger asChild>
-          <Button
-            variant="ghost"
-            size="icon"
-            aria-label="Open volume controls"
-          >
+          <Button variant="ghost" size="icon" aria-label="Open volume controls">
             <AnimatePresence mode="popLayout" initial={false}>
               <motion.span
                 key={Icon.displayName ?? Icon.name}
@@ -377,7 +374,12 @@ export function VolumeControl({
               onValueChange={([v]) => setVolume(v / 100)}
             />
           )}
-          <div className={cn("flex items-center", direction === "horizontal" && "gap-2")}>
+          <div
+            className={cn(
+              "flex items-center",
+              direction === "horizontal" && "gap-2",
+            )}
+          >
             <button
               type="button"
               onClick={toggleMute}
@@ -398,12 +400,16 @@ export function VolumeControl({
   );
 }
 
-export type PlayerBarVariant = "right" | "floating";
+export type PlayerBarVariant = "right" | "floating" | "fullscreen";
 
 export function PlayerBar({
   variant = "right",
+  onCoverActivate,
+  onRequestClose,
 }: {
   variant?: PlayerBarVariant;
+  onCoverActivate?: () => void;
+  onRequestClose?: () => void;
 }) {
   const {
     playing,
@@ -439,11 +445,13 @@ export function PlayerBar({
   const [queueOpen, setQueueOpen] = useState(false);
   const iTunesCover = useITunesCover(track);
   const lyricsState = useLyricsView(track);
+  const fullscreen = variant === "fullscreen";
   // The cover doubles as a drag handle for layout switching. In the
   // floating window the OS title bar already owns drag, so we don't
   // attach our own handler there.
   const { onPointerDown: onCoverPointerDown } = usePlayerCoverDrag({
-    enabled: variant !== "floating",
+    enabled: variant === "right",
+    onActivate: variant === "right" ? onCoverActivate : undefined,
   });
 
   const hasTrack = !!track;
@@ -462,7 +470,9 @@ export function PlayerBar({
   const wrapperClass =
     variant === "right"
       ? "fixed bottom-2 right-2 top-(--titlebar-h) z-10 flex w-[22rem] flex-col rounded-[34px] border"
-      : "absolute inset-0 flex flex-col bg-transparent";
+      : fullscreen
+        ? "absolute inset-0 z-10 flex flex-col bg-background/20 text-foreground"
+        : "absolute inset-0 flex flex-col bg-transparent";
 
   return (
     // shadcn's SidebarProvider injects a nested TooltipProvider with
@@ -481,6 +491,17 @@ export function PlayerBar({
           wrapperClass,
         )}
       >
+        {fullscreen && onRequestClose ? (
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={onRequestClose}
+            aria-label="Exit full-screen player"
+            className="absolute right-5 top-5 z-30 rounded-full bg-black/15 backdrop-blur-md hover:bg-black/25"
+          >
+            <Minimize2Icon />
+          </Button>
+        ) : null}
         {/* Queue overlay vs. cover-and-lyrics body. AnimatePresence
           crossfades the two when the user toggles the queue button.
           Both branches fill the card above the bottom action row
@@ -508,7 +529,11 @@ export function PlayerBar({
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               transition={{ duration: 0.07 }}
-              className="flex min-h-0 flex-1 flex-col"
+              className={cn(
+                "flex min-h-0 flex-1 flex-col",
+                fullscreen &&
+                  "grid grid-cols-[minmax(18rem,0.85fr)_minmax(22rem,1.15fr)] items-center gap-[clamp(2rem,7vw,8rem)] px-[clamp(2.5rem,9vw,11rem)] pt-8 pb-20",
+              )}
             >
               {/* Top fixed section: cover, meta, progress, controls.
           Floating variant drops the top padding so the cover sits
@@ -518,6 +543,7 @@ export function PlayerBar({
                 className={cn(
                   "flex flex-col gap-3 p-4 pb-3",
                   variant === "floating" && "pt-0",
+                  fullscreen && "w-full max-w-[38rem] justify-self-end p-0",
                 )}
               >
                 {status === "error" && error ? (
@@ -534,10 +560,31 @@ export function PlayerBar({
             the cap is a no-op there. */}
                 <div
                   onPointerDown={onCoverPointerDown}
+                  onClick={fullscreen ? onRequestClose : undefined}
+                  role={onCoverActivate || fullscreen ? "button" : undefined}
+                  aria-label={
+                    fullscreen
+                      ? "Exit full-screen player"
+                      : onCoverActivate
+                        ? "Open full-screen player"
+                        : undefined
+                  }
+                  tabIndex={onCoverActivate || fullscreen ? 0 : undefined}
+                  onKeyDown={(event) => {
+                    const activate = fullscreen
+                      ? onRequestClose
+                      : onCoverActivate;
+                    if (!activate) return;
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      activate();
+                    }
+                  }}
                   className={cn(
                     "mx-auto w-full max-w-[20rem] touch-none select-none",
-                    variant !== "floating" &&
-                      "cursor-grab active:cursor-grabbing",
+                    variant === "right" && "cursor-grab active:cursor-grabbing",
+                    fullscreen &&
+                      "max-w-[min(48vh,36rem)] cursor-zoom-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80",
                   )}
                 >
                   {track ? (
@@ -663,7 +710,13 @@ export function PlayerBar({
               {/* Lyrics flow — fills the rest of the cover-branch flex
                 column. Lives inside the same motion.div as the cover
                 so the whole non-queue body crossfades as one unit. */}
-              <div className="flex min-h-0 flex-1 flex-col px-3">
+              <div
+                className={cn(
+                  "flex min-h-0 flex-1 flex-col px-3",
+                  fullscreen &&
+                    "h-[70vh] max-h-[52rem] w-full max-w-[48rem] justify-self-start px-0",
+                )}
+              >
                 <LyricsBody
                   state={lyricsState}
                   compact={variant === "floating"}
@@ -679,7 +732,13 @@ export function PlayerBar({
           `onGoToArtist` callback emits a Tauri nav event there
           instead of calling `useNavigate` (which would throw without
           a router). */}
-        <div className="flex items-center justify-between gap-2 px-3 pt-2 pb-3">
+        <div
+          className={cn(
+            "flex items-center justify-between gap-2 px-3 pt-2 pb-3",
+            fullscreen &&
+              "absolute inset-x-[clamp(2.5rem,9vw,11rem)] bottom-5 rounded-full border border-white/10 bg-black/10 px-4 py-2 backdrop-blur-md",
+          )}
+        >
           <div className="flex items-center gap-0.5">
             <LyricsSourceButton state={lyricsState} />
             <QueueToggleButton

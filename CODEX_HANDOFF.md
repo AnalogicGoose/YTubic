@@ -3,9 +3,9 @@
 > **Read this file first in every new Codex session.** It is the durable product,
 > engineering, UI, release, and troubleshooting context for this repository.
 >
-> Last verified: **2026-07-13**
-> Current app version: **0.4.4**
-> Current `main`: **v0.4.3 release source plus the prepared v0.4.4 UI/native-material release work**
+> Last verified: **2026-07-15**
+> Current app version: **0.4.5**
+> Current `main`: **v0.4.5 release candidate with Figma Glass menu/player fixes**
 > Latest public release: <https://github.com/AnalogicGoose/Goosic/releases/tag/v0.4.3>
 
 ## 1. New-session quick start
@@ -298,6 +298,13 @@ the content/album background remains visible beneath it.
 
 - The bottom player is an overlay above content; content remains visible under
   the translucent blur.
+- Clicking (rather than dragging) the cover in the right or bottom player opens
+  the in-window immersive player. It is the existing `PlayerBar` with the
+  `fullscreen` variant: cover/metadata/progress/transport on the left, the
+  existing synchronized `LyricsBody` on the right, and the existing
+  `NowPlayingBackground` behind both. Clicking the large cover, pressing Escape,
+  or using the minimize button exits. Do not replace this with a second WebView
+  or duplicate player/audio component.
 - The right/floating player and bottom player should share the same background
   and glass material decisions where the platform implementation permits it.
   The first native Liquid Glass pass intentionally applies only to the
@@ -426,7 +433,8 @@ All menus, popovers, dropdowns, and player surfaces share one material:
 `GLASS_SURFACE_CLASS` in `src/components/ui/glass-surface.ts`, backed by the
 `.liquid-glass` class in `src/index.css` (blur 26px + saturate + outline +
 drop shadow — the user explicitly removed inset specular/glow highlights;
-do not add them back).
+do not add those CSS inset shadows back). The Windows refraction experiment
+does include Kube's directional specular _map_ inside the SVG optics chain.
 
 On top of that, **Windows only** gets true backdrop refraction as an
 experiment (Settings → Experiments → "Liquid glass refraction",
@@ -437,25 +445,43 @@ experiment (Settings → Experiments → "Liquid glass refraction",
   renders SVG filters inside `backdrop-filter`. WebKit (macOS) ignores
   `backdrop-filter: url()` entirely ([WebKit bug 245510]), so macOS always
   keeps the classic blur material and the Experiments row is hidden there.
-- The lens filter lives in
-  `src/components/layout/liquid-glass-defs.tsx` (`#liquid-glass-lens`,
-  feImage displacement map + feDisplacementMap). It must be mounted once
-  per window — AppShell and FloatingPlayerApp both render it because they
-  are separate documents.
+- The lens engine lives in
+  `src/components/layout/liquid-glass-defs.tsx`. It independently implements
+  the Kube article's convex-squircle/Snell-law pipeline: a 127-sample radial
+  profile, rounded-rectangle vector field, 8-bit red/green displacement map,
+  directional specular map, and SVG blur/displacement/saturation/blend chain.
+  A MutationObserver + ResizeObserver gives every live menu/player its own
+  dimension-matched filter; fixed backdrop-filter images do not size
+  themselves in Chromium. Detached portaled menus are unregistered.
+- The experiment uses the Kube music-player defaults: refractive index 1.5,
+  blur 1, specular opacity 0.4, specular saturation 6, refraction level 1, and
+  glass background opacity 0.6. The 0.6 player tint is experiment-only;
+  disabling it restores Goosic's classic 10% player tint.
+- Menus/popovers intentionally use a more legible optics preset than the
+  player: Gaussian blur 32 and refraction level 0.7. Without it, large cover
+  features stay sharp and visually swallow menu labels. Player parallax keeps
+  blur 1/refraction 1.
+- The SVG host is mounted in AppShell for the main document. The floating player
+  deliberately does not mount it: that separate WebView uses the classic static
+  `blur(26px) saturate(1.9)` glass instead of duplicating the runtime SVG maps.
 - CSS: `.liquid-refract .liquid-glass` in `src/index.css`.
-- This has NOT been visually verified on real Windows hardware yet — only
-  in a Chromium harness. Check it on a Windows machine before release.
+- Verified in the real Windows WebView2 dev app on 2026-07-14: a 918×106
+  bottom player received a 920×104 filter at 73.33px displacement, and a live
+  224×254 song context menu received a separate 224×256 filter. The compositor
+  screenshot showed the expected moving/bent content behind the player.
 
 ## 8c. Background GPU saver (minimized/hidden windows)
 
-`useWindowHidden()` in `src/hooks/use-window-hidden.ts` reports when a
+`useWindowHidden()` in `src/hooks/use-window-hidden.ts` reports when the main
 window is minimized or hidden to tray (document.visibilitychange +
-`tauri://resize` → `isMinimized()`). AppShell and FloatingPlayerApp unmount
-`NowPlayingBackground` while hidden, killing the album mesh's continuously
-animating blur stack so a backgrounded app costs near-zero GPU while audio
-keeps playing. The background remounts (with its normal fade-in) on
-restore. Do not "optimize" this into opacity/visibility toggles — the
-compositor keeps animating hidden layers; unmounting is the point.
+`tauri://resize` → `isMinimized()`). AppShell unmounts `NowPlayingBackground`
+while hidden, killing the album mesh's continuously animating blur stack so a
+backgrounded app costs near-zero GPU while audio keeps playing. The standalone
+floating-player WebView never mounts `NowPlayingBackground` or `LiquidGlassDefs`:
+it retains the existing components and classic static web glass, avoiding a
+second animated mesh and runtime refraction compositor. Do not "optimize" the
+main window into opacity/visibility toggles — the compositor keeps animating
+hidden layers; unmounting is the point.
 
 ## 9. Branding
 
@@ -805,8 +831,11 @@ persisted and synchronized across native windows.
 
 ## 18. Recent release history
 
-- `v0.4.4` — pending release for the macOS native window/login improvements,
-  native Liquid Glass floating player, and cross-platform UI polish.
+- `v0.4.5` — Figma Glass preset across menus/player, complete pixel-matched
+  frames, capped WebView2 refraction, immersive player mode, and lower-cost
+  floating-player WebView.
+- `v0.4.4` — macOS native window/login improvements, native Liquid Glass
+  floating player, and cross-platform UI polish.
 - `v0.4.3` — adds a universal Apple Silicon/Intel macOS DMG and updater
   artifact, plus native Keychain-backed account-cookie encryption. The initial
   macOS build is ad-hoc signed until Apple Developer credentials are provided.
@@ -832,12 +861,18 @@ persisted and synchronized across native windows.
 At the time this document was last refreshed:
 
 - `v0.4.3` is public with Windows, Linux, and universal macOS artifacts.
-- `v0.4.4` is prepared for release. It includes the Safari-identified macOS
+- `v0.4.5` is prepared for release. It includes the Figma Glass preset,
+  pixel-exact menu filters, capped refraction/dispersion, immersive player
+  mode, and floating-player GPU safeguards. It also includes the Safari-
+  identified macOS
   WKWebView login flow, transparent 16px native windows and traffic lights,
   AppKit-backed Liquid Glass for the standalone floating player on macOS 26+
   (`NSVisualEffectView` fallback on older releases), plus the related UI polish
   and performance safeguards. It has no Apple certificate/notarization
   credentials yet, so macOS remains ad-hoc signed.
+- The Windows Liquid Glass experiment now uses dimension-matched Figma-style
+  refraction/specular/dispersion filters with a safe WebView2 scale. Real
+  WebView2 player, context-menu, Queue, and Lyrics checks passed.
 
 When this snapshot becomes stale, update this section, the header version, and
 the recent release history as part of the next release.

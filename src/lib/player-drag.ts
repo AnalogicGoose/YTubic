@@ -79,7 +79,10 @@ export const usePlayerDragStore = create<DragState>((set) => ({
  * `enabled = false` (e.g. inside the floating window itself) skips
  * everything so the OS title-bar drag isn't competed with.
  */
-export function usePlayerCoverDrag({ enabled = true }: { enabled?: boolean } = {}) {
+export function usePlayerCoverDrag({
+  enabled = true,
+  onActivate,
+}: { enabled?: boolean; onActivate?: () => void } = {}) {
   const setMode = useLayoutStore((s) => s.setMode);
   const setActive = usePlayerDragStore((s) => s.setActive);
   const setZone = usePlayerDragStore((s) => s.setZone);
@@ -96,10 +99,12 @@ export function usePlayerCoverDrag({ enabled = true }: { enabled?: boolean } = {
   const setActiveRef = useRef(setActive);
   const setZoneRef = useRef(setZone);
   const setCursorRef = useRef(setCursor);
+  const onActivateRef = useRef(onActivate);
   setModeRef.current = setMode;
   setActiveRef.current = setActive;
   setZoneRef.current = setZone;
   setCursorRef.current = setCursor;
+  onActivateRef.current = onActivate;
 
   // Make sure we never leave the global drag-flag stuck on if the
   // component unmounts mid-drag (e.g. user switches mode via the
@@ -162,7 +167,10 @@ export function usePlayerCoverDrag({ enabled = true }: { enabled?: boolean } = {
       const onUp = (ev: PointerEvent) => {
         const wasDragging = draggingRef.current;
         cleanup();
-        if (!wasDragging) return;
+        if (!wasDragging) {
+          onActivateRef.current?.();
+          return;
+        }
 
         const zone = detectZone(ev.clientX, ev.clientY);
         const currentMode = useLayoutStore.getState().mode;
