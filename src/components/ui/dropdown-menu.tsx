@@ -5,7 +5,7 @@ import { CheckIcon, ChevronRightIcon, CircleIcon } from "lucide-react"
 import { DropdownMenu as DropdownMenuPrimitive } from "radix-ui"
 
 import { cn } from "@/lib/utils"
-import { GLASS_SURFACE_CLASS } from "@/components/ui/glass-surface"
+import { MENU_GLASS_SURFACE_CLASS } from "@/components/ui/glass-surface"
 
 function DropdownMenu({
   ...props
@@ -44,7 +44,7 @@ function DropdownMenuContent({
         sideOffset={sideOffset}
         className={cn(
           "app-scroll menu-scroll menu-shell-clip z-50 max-h-(--radix-dropdown-menu-content-available-height) min-w-[8rem] origin-(--radix-dropdown-menu-content-transform-origin) overflow-x-hidden overflow-y-auto rounded-[34px] border px-0 py-2.5 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95",
-          GLASS_SURFACE_CLASS,
+          MENU_GLASS_SURFACE_CLASS,
           className
         )}
         {...props}
@@ -236,7 +236,7 @@ function DropdownMenuSubContent({
         sideOffset={sideOffset}
         className={cn(
           "app-scroll menu-scroll menu-shell-clip z-50 min-w-[8rem] origin-(--radix-dropdown-menu-content-transform-origin) overflow-hidden rounded-[34px] border px-0 py-2.5 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95",
-          GLASS_SURFACE_CLASS,
+          MENU_GLASS_SURFACE_CLASS,
           className
         )}
         {...props}

@@ -1,5 +1,7 @@
 import { useEffect, useRef } from "react";
 import { isWindowsWebview } from "@/lib/platform";
+import { useSettingsStore } from "@/lib/store/settings";
+import { clampGlassBlur } from "@/lib/themes";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 const GLASS_SELECTOR = ".liquid-glass";
@@ -32,11 +34,17 @@ type SurfaceRegistration = {
 
 type MapPair = {
   displacement: string;
-  specular: string;
   maximumDisplacement: number;
 };
 
 const mapCache = new Map<string, MapPair>();
+// feImage stretches the vector field to the panel's exact dimensions, so
+// Full-window rasters only waste memory. Bound map resolution and resize
+// history: sixteen worst-case 512-by-512 RGBA maps total roughly 16 MiB.
+// 512px keeps ultra-wide player maps tall enough for a clean optical edge;
+// small menus remain native-resolution.
+const MAX_MAP_RASTER_SIZE = 512;
+const MAX_CACHED_MAPS = 16;
 
 function convexSquircle(x: number): number {
   const clamped = Math.min(1, Math.max(0, x));
@@ -116,7 +124,11 @@ function sampleProfile(profile: Float32Array, x: number): number {
 function createMaps(width: number, height: number, radius: number): MapPair {
   // feImage scales this capped raster back to the exact CSS-pixel size. The
   // radius is scaled with it so the bezel stays physically consistent.
-  const rasterScale = Math.min(1, 1024 / width, 1024 / height);
+  const rasterScale = Math.min(
+    1,
+    MAX_MAP_RASTER_SIZE / width,
+    MAX_MAP_RASTER_SIZE / height,
+  );
   const rasterWidth = Math.max(2, Math.round(width * rasterScale));
   const rasterHeight = Math.max(2, Math.round(height * rasterScale));
   const rasterRadius = Math.max(1, radius * rasterScale);
@@ -125,19 +137,13 @@ function createMaps(width: number, height: number, radius: number): MapPair {
     maximumDepth,
     FIGMA_GLASS_PRESET.depth * rasterScale,
   );
-  const specularWidth = Math.min(
-    maximumDepth,
-    bezelWidth * (1 + FIGMA_GLASS_PRESET.splay / 50),
-  );
   const profile = createConvexRefractionProfile();
 
   const displacementCanvas = document.createElement("canvas");
-  const specularCanvas = document.createElement("canvas");
-  displacementCanvas.width = specularCanvas.width = rasterWidth;
-  displacementCanvas.height = specularCanvas.height = rasterHeight;
+  displacementCanvas.width = rasterWidth;
+  displacementCanvas.height = rasterHeight;
   const displacementContext = displacementCanvas.getContext("2d");
-  const specularContext = specularCanvas.getContext("2d");
-  if (!displacementContext || !specularContext) {
+  if (!displacementContext) {
     throw new Error("Canvas 2D is unavailable for Liquid Glass maps");
   }
 
@@ -145,15 +151,7 @@ function createMaps(width: number, height: number, radius: number): MapPair {
     rasterWidth,
     rasterHeight,
   );
-  const specularImage = specularContext.createImageData(
-    rasterWidth,
-    rasterHeight,
-  );
   const epsilon = 0.75;
-  const lightRadians = (FIGMA_GLASS_PRESET.lightAngle * Math.PI) / 180;
-  // Figma's 0° light is at the top of the object.
-  const lightX = Math.sin(lightRadians);
-  const lightY = -Math.cos(lightRadians);
 
   for (let y = 0; y < rasterHeight; y += 1) {
     for (let x = 0; x < rasterWidth; x += 1) {
@@ -170,9 +168,8 @@ function createMaps(width: number, height: number, radius: number): MapPair {
       const distanceFromEdge = -sdf;
       let red = 128;
       let green = 128;
-      let specularAlpha = 0;
 
-      if (distanceFromEdge >= 0 && distanceFromEdge < specularWidth) {
+      if (distanceFromEdge >= 0 && distanceFromEdge < bezelWidth) {
         const outwardX =
           roundedRectSdf(
             px + epsilon,
@@ -206,42 +203,58 @@ function createMaps(width: number, height: number, radius: number): MapPair {
         const normalLength = Math.hypot(outwardX, outwardY) || 1;
         const inwardX = -outwardX / normalLength;
         const inwardY = -outwardY / normalLength;
-        if (distanceFromEdge < bezelWidth) {
-          const magnitude = sampleProfile(
-            profile.normalized,
-            distanceFromEdge / bezelWidth,
-          );
-          red = Math.round(128 + inwardX * magnitude * 127);
-          green = Math.round(128 + inwardY * magnitude * 127);
-        }
-
-        // Figma-style light wraps the full perimeter. A small baseline keeps
-        // the frame visually complete while the directional term makes the
-        // top/bottom glints respond to the configured angle.
-        const light = Math.abs(inwardX * lightX + inwardY * lightY);
-        const spread = Math.max(0, 1 - distanceFromEdge / specularWidth);
-        const glint = Math.pow((0.18 + light * 0.82) * spread, 1.5);
-        specularAlpha = Math.round(255 * glint);
+        const magnitude = sampleProfile(
+          profile.normalized,
+          distanceFromEdge / bezelWidth,
+        );
+        red = Math.round(128 + inwardX * magnitude * 127);
+        green = Math.round(128 + inwardY * magnitude * 127);
       }
 
       displacementImage.data[offset] = red;
       displacementImage.data[offset + 1] = green;
       displacementImage.data[offset + 2] = 128;
       displacementImage.data[offset + 3] = 255;
-      specularImage.data[offset] = 255;
-      specularImage.data[offset + 1] = 255;
-      specularImage.data[offset + 2] = 255;
-      specularImage.data[offset + 3] = specularAlpha;
     }
   }
 
   displacementContext.putImageData(displacementImage, 0, 0);
-  specularContext.putImageData(specularImage, 0, 0);
-  return {
+  const maps = {
     displacement: displacementCanvas.toDataURL("image/png"),
-    specular: specularCanvas.toDataURL("image/png"),
-    maximumDisplacement: profile.maximumDisplacement / rasterScale,
+    // feImage already stretches the lower-resolution vector field to the
+    // panel's exact CSS size. Scaling displacement again by 1/rasterScale
+    // pulls the optical edge far inside large player surfaces.
+    maximumDisplacement: profile.maximumDisplacement,
   };
+  // Release the temporary backing store now instead of waiting for renderer
+  // GC after every resize or newly opened glass surface.
+  displacementCanvas.width = 1;
+  displacementCanvas.height = 1;
+  return maps;
+}
+
+function getCachedMaps(
+  key: string,
+  width: number,
+  height: number,
+  radius: number,
+): MapPair {
+  const cached = mapCache.get(key);
+  if (cached) {
+    // Refresh insertion order so the first entry remains the least used.
+    mapCache.delete(key);
+    mapCache.set(key, cached);
+    return cached;
+  }
+
+  const maps = createMaps(width, height, radius);
+  mapCache.set(key, maps);
+  while (mapCache.size > MAX_CACHED_MAPS) {
+    const oldestKey = mapCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    mapCache.delete(oldestKey);
+  }
+  return maps;
 }
 
 function svgElement(name: string): SVGElement {
@@ -306,62 +319,12 @@ function appendFilter(
     yChannelSelector: "G",
     result: "displaced",
   });
-  const saturation = svgElement("feColorMatrix");
-  setAttributes(saturation, {
-    in: "displaced",
-    type: "saturate",
-    values: 6,
-    result: "displaced_saturated",
-  });
-  const specularImage = svgElement("feImage");
-  setAttributes(specularImage, {
-    href: maps.specular,
-    x: -1,
-    y: -1,
-    width: width + 2,
-    height: height + 2,
-    preserveAspectRatio: "none",
-    result: "specular_layer",
-  });
-  const specularSaturated = svgElement("feComposite");
-  setAttributes(specularSaturated, {
-    in: "displaced_saturated",
-    in2: "specular_layer",
-    operator: "in",
-    result: "specular_saturated",
-  });
-  const specularFaded = svgElement("feComponentTransfer");
-  setAttributes(specularFaded, {
-    in: "specular_layer",
-    result: "specular_faded",
-  });
-  const alpha = svgElement("feFuncA");
-  setAttributes(alpha, { type: "linear", slope: 0.4 });
-  specularFaded.append(alpha);
-  const withSaturation = svgElement("feBlend");
-  setAttributes(withSaturation, {
-    in: "specular_saturated",
-    in2: "displaced",
-    mode: "normal",
-    result: "with_saturation",
-  });
-  const output = svgElement("feBlend");
-  setAttributes(output, {
-    in: "specular_faded",
-    in2: "with_saturation",
-    mode: "normal",
-  });
-  filter.append(
-    blur,
-    displacementImage,
-    displacement,
-    saturation,
-    specularImage,
-    specularSaturated,
-    specularFaded,
-    withSaturation,
-    output,
-  );
+  // The refracted, blurred backdrop IS the output — no saturation lift and
+  // no specular rim. The old 6× saturate blew the backdrop into a vivid,
+  // over-saturated smear; showing true colors reads as clean glass. The
+  // last appended primitive is the filter's result, so `displacement`
+  // (result "displaced") is what paints.
+  filter.append(blur, displacementImage, displacement);
   defs.append(filter);
 }
 
@@ -378,6 +341,19 @@ function geometryKey(width: number, height: number, radius: number): string {
  */
 export function LiquidGlassDefs() {
   const defsRef = useRef<SVGDefsElement>(null);
+  // The Glass-blur slider drives the shader's Gaussian blur. Held in a ref so
+  // the observer effect (mounted once) always reads the live value without
+  // being torn down and rebuilt on every slider tick.
+  const glassBlur = useSettingsStore((s) => s.glassBlur);
+  const blurRef = useRef(glassBlur);
+  blurRef.current = clampGlassBlur(glassBlur);
+  // Set by the observer effect; lets the slider force a re-measure of every
+  // live glass panel so the new blur is baked into fresh per-surface filters.
+  const remeasureAllRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    remeasureAllRef.current?.();
+  }, [glassBlur]);
 
   useEffect(() => {
     if (!isWindowsWebview() || !defsRef.current) return;
@@ -406,25 +382,22 @@ export function LiquidGlassDefs() {
         height / 2,
       );
       const isPlayer = element.classList.contains("liquid-glass-player");
-      const geometry = `${isPlayer ? "player" : "menu"}-${width}x${height}r${Math.round(radius)}`;
+      // A single user-controlled blur for every surface (the Glass-blur
+      // slider), baked into the shader here so the refraction path honors it
+      // just like the plain CSS backdrop-filter does. The displacement
+      // (refraction) strength keeps the player/menu distinction.
+      const blurLevel = blurRef.current;
+      const geometry = `${isPlayer ? "player" : "menu"}-${width}x${height}r${Math.round(radius)}b${blurLevel}`;
       if (registration.geometry === geometry) return;
       registration.geometry = geometry;
-      // Keep Kube's clearer moving-player optics, but make compact menus much
-      // calmer and more legible: 32px blur plus the article's 0.7 control-like
-      // refraction level prevents large cover-art features swallowing labels.
-      const blurLevel = isPlayer ? 1 : 32;
       const refractionLevel = isPlayer ? 1 : 0.7;
       // Raster maps stay cached in 8px buckets (feImage stretches them the
       // last few pixels), but the filter geometry itself is exact — a bucket
       // rounded below the panel size leaves an unmapped displacement strip.
       const key = geometryKey(width, height, radius);
-      let maps = mapCache.get(key);
-      if (!maps) {
-        const [size, radiusPart] = key.split("r");
-        const [mapWidth, mapHeight] = size.split("x").map(Number);
-        maps = createMaps(mapWidth, mapHeight, Number(radiusPart));
-        mapCache.set(key, maps);
-      }
+      const [size, radiusPart] = key.split("r");
+      const [mapWidth, mapHeight] = size.split("x").map(Number);
+      const maps = getCachedMaps(key, mapWidth, mapHeight, Number(radiusPart));
       // Fresh id per geometry change: swapping the url() reference is the
       // repaint signal Chromium reliably honors for backdrop filters. The
       // superseded per-surface filter is dropped right after, so defs holds
@@ -485,6 +458,16 @@ export function LiquidGlassDefs() {
     };
 
     scan(document.body);
+
+    // Re-run every live surface's measurement (geometry reset forces a fresh
+    // filter) so a Glass-blur slider change repaints the shader immediately.
+    remeasureAllRef.current = () => {
+      for (const [element, registration] of registrations) {
+        registration.geometry = null;
+        scheduleMeasure(element);
+      }
+    };
+
     const mutationObserver = new MutationObserver((mutations) => {
       for (const mutation of mutations) {
         mutation.addedNodes.forEach(scan);
@@ -494,6 +477,7 @@ export function LiquidGlassDefs() {
     mutationObserver.observe(document.body, { childList: true, subtree: true });
 
     return () => {
+      remeasureAllRef.current = null;
       mutationObserver.disconnect();
       for (const [element, registration] of registrations) {
         registration.resizeObserver.disconnect();

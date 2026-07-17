@@ -942,8 +942,40 @@ async fn ensure_session_keeper(
     // when the external page finishes loading, this puts it straight back to
     // hidden so the user never sees a stray music.youtube.com window.
     let _ = win.hide();
+    set_hidden_webview_low_memory(&win);
     Ok((win, true))
 }
+
+/// Ask WebView2 to discard non-essential renderer caches for the hidden
+/// authenticated session keeper. This is a supported memory-pressure hint,
+/// not suspension: navigation, JavaScript, networking, and cookie refreshes
+/// continue normally. Older WebView2 runtimes simply reject the newer COM
+/// interface and retain their default behavior.
+#[cfg(windows)]
+fn set_hidden_webview_low_memory(win: &tauri::WebviewWindow) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,
+    };
+    use windows_core::Interface;
+
+    let _ = win.with_webview(|platform_webview| {
+        let result = (|| -> windows_core::Result<()> {
+            let controller = platform_webview.controller();
+            let webview = unsafe { controller.CoreWebView2()? };
+            let webview_19 = webview.cast::<ICoreWebView2_19>()?;
+            unsafe {
+                webview_19.SetMemoryUsageTargetLevel(COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            eprintln!("[accounts] WebView2 low-memory hint unavailable: {error}");
+        }
+    });
+}
+
+#[cfg(not(windows))]
+fn set_hidden_webview_low_memory(_win: &tauri::WebviewWindow) {}
 
 /// Refresh the replayed cookie snapshot for `id` from its live session-
 /// keeper WebView. Reloads the keeper to force fresh authenticated

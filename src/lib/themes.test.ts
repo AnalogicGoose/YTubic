@@ -6,16 +6,27 @@ describe("visual theme registry", () => {
     for (const theme of VISUAL_THEMES) {
       expect(theme.light["--brand"]).toBeTruthy();
       expect(theme.dark["--brand"]).toBeTruthy();
-      expect(theme.light["--glass-blur"]).toBe("26px");
-      expect(theme.dark["--glass-blur"]).toBe("26px");
+      // Glass tint is a shared material; blur/opacity are user-driven and
+      // deliberately NOT baked into the per-theme token set.
+      expect(theme.light["--glass-tint-light"]).toBeTruthy();
+      expect(theme.dark["--glass-tint-dark"]).toBeTruthy();
+      expect(theme.light["--glass-blur"]).toBeUndefined();
       expect(theme.light["--radius"]).toBe("34px");
       expect(theme.dark["--radius"]).toBe("34px");
     }
   });
 
+  it("exposes exactly the Default and Modern themes", () => {
+    expect(VISUAL_THEMES.map((t) => t.id)).toEqual(["default", "modern"]);
+    expect(getVisualTheme("default").playerLayout).toBe("classic");
+    expect(getVisualTheme("modern").playerLayout).toBe("modern");
+  });
+
   it("validates persisted IDs and falls back safely", () => {
-    expect(isVisualThemeId("ocean")).toBe(true);
+    expect(isVisualThemeId("modern")).toBe(true);
+    // Retired ids from older installs must no longer validate.
+    expect(isVisualThemeId("ocean")).toBe(false);
     expect(isVisualThemeId("not-a-theme")).toBe(false);
-    expect(getVisualTheme("not-a-theme" as never).id).toBe("goosic");
+    expect(getVisualTheme("not-a-theme" as never).id).toBe("default");
   });
 });

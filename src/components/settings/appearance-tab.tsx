@@ -1,11 +1,14 @@
 import { useTheme } from "next-themes";
 import {
+  BlendIcon,
   ChevronDownIcon,
+  DropletsIcon,
   LayoutDashboardIcon,
   PaletteIcon,
   WallpaperIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Slider } from "@/components/ui/slider";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -18,6 +21,7 @@ import { Group, SettingRow, TabPane } from "@/components/settings/primitives";
 import { useLayoutStore, type LayoutMode } from "@/lib/store/layout";
 import { useSettingsStore, type BackgroundMode } from "@/lib/store/settings";
 import {
+  GLASS_BLUR_MAX,
   getVisualTheme,
   VISUAL_THEMES,
   type VisualThemeId,
@@ -44,6 +48,10 @@ export function AppearanceTab() {
   const { theme, setTheme } = useTheme();
   const visualTheme = useSettingsStore((s) => s.visualTheme);
   const setVisualTheme = useSettingsStore((s) => s.setVisualTheme);
+  const glassOpacity = useSettingsStore((s) => s.glassOpacity);
+  const setGlassOpacity = useSettingsStore((s) => s.setGlassOpacity);
+  const glassBlur = useSettingsStore((s) => s.glassBlur);
+  const setGlassBlur = useSettingsStore((s) => s.setGlassBlur);
   const layoutMode = useLayoutStore((s) => s.mode);
   const setLayoutMode = useLayoutStore((s) => s.setMode);
   const background = useSettingsStore((s) => s.background);
@@ -55,7 +63,7 @@ export function AppearanceTab() {
         <SettingRow
           icon={PaletteIcon}
           title="Interface style"
-          description="Choose a complete visual child theme. Every shared component consumes the same semantic tokens and material settings."
+          description="Default keeps album art and metadata up front; Modern centers the now-playing bar with the transport on the left."
           control={
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -96,6 +104,48 @@ export function AppearanceTab() {
                 </DropdownMenuRadioGroup>
               </DropdownMenuContent>
             </DropdownMenu>
+          }
+        />
+        <SettingRow
+          icon={BlendIcon}
+          title="Frosted glass"
+          description="How opaque the glass surfaces are — drag toward transparent for more frost, toward solid for more cover."
+          control={
+            <div className="flex w-44 items-center gap-3">
+              <Slider
+                value={[Math.round(glassOpacity * 100)]}
+                min={0}
+                max={100}
+                step={1}
+                aria-label="Frosted glass opacity"
+                onValueChange={([v]) => setGlassOpacity(v / 100)}
+                className="min-w-0 flex-1"
+              />
+              <span className="w-9 text-right text-xs font-medium tabular-nums text-muted-foreground">
+                {Math.round(glassOpacity * 100)}%
+              </span>
+            </div>
+          }
+        />
+        <SettingRow
+          icon={DropletsIcon}
+          title="Glass blur"
+          description="How much the glass frosts the content behind it. Higher is softer; zero shows a crisp backdrop."
+          control={
+            <div className="flex w-44 items-center gap-3">
+              <Slider
+                value={[glassBlur]}
+                min={0}
+                max={GLASS_BLUR_MAX}
+                step={1}
+                aria-label="Glass blur radius"
+                onValueChange={([v]) => setGlassBlur(v)}
+                className="min-w-0 flex-1"
+              />
+              <span className="w-9 text-right text-xs font-medium tabular-nums text-muted-foreground">
+                {glassBlur}px
+              </span>
+            </div>
           }
         />
         <SettingRow

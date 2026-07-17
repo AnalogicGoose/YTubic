@@ -35,6 +35,12 @@
   /* Figma corner-radius token: keep every semantic rounded utility aligned. */
   --radius: 34px;
 
+  /* Shared glass tint alpha (transparent → opaque). The theme sets the RGB
+     tint; this single alpha is user-controlled from Settings and is the only
+     thing that varies the frost across every glass surface. Seeded here for
+     first paint; `useGlassOpacity` keeps it in sync with the saved setting. */
+  --glass-opacity: 0.52;
+
   --sidebar: oklch(0.985 0 0);
   --sidebar-foreground: oklch(0.145 0 0);
   --sidebar-primary: var(--brand);
@@ -57,16 +63,14 @@
   /* The theme registry mounts these values inline. Defaults keep the first
      paint identical before Zustand/next-themes hydration completes. */
   --glass-blur: 26px;
-  --glass-saturation: 190%;
+  --glass-saturation: 120%;
   --glass-brightness: 1.04;
-  --glass-bg-light: rgba(255, 255, 255, 0.55);
-  --glass-bg-dark: rgba(32, 32, 36, 0.52);
-  --glass-border-light: rgba(255, 255, 255, 0.45);
-  --glass-border-dark: rgba(255, 255, 255, 0.18);
+  --glass-tint-light: 255 255 255;
+  --glass-tint-dark: 32 32 36;
+  --glass-border-light: rgba(255, 255, 255, 0.3);
+  --glass-border-dark: rgba(255, 255, 255, 0.07);
   --glass-shadow-light: 0 12px 48px rgba(0, 0, 0, 0.28);
   --glass-shadow-dark: 0 12px 48px rgba(0, 0, 0, 0.5);
-  --glass-player-light: rgba(255, 255, 255, 0.1);
-  --glass-player-dark: rgba(32, 32, 36, 0.1);
   --app-font-family:
     -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu,
     Cantarell, "Open Sans", "Helvetica Neue", sans-serif;
@@ -192,6 +196,14 @@
     -webkit-user-select: text;
   }
 
+  /* Artwork, icons, and links are app chrome, not draggable web content.
+     They remain clickable. Row-level drag interactions (such as queue
+     reordering) stay handled by their explicit draggable container. */
+  img,
+  a {
+    -webkit-user-drag: none;
+  }
+
   /* The macOS/Linux native backing window is transparent, so clipping the
      React root removes square corner pixels from both main and floating
      windows. This outer-window radius is separate from the 34px UI token. */
@@ -273,9 +285,12 @@
      same material; consumed via GLASS_SURFACE_CLASS in glass-surface.ts.
      background-color (not a gradient) on purpose — the player surface
      overrides it with its documented 10% tint via Tailwind utilities. */
+  /* One material for every glass surface — player, menus, popovers, cards.
+     Tint (RGB) comes from the theme; the alpha is the shared, user-tunable
+     `--glass-opacity`. There are deliberately no per-surface overrides. */
   .liquid-glass {
     border-color: var(--glass-border-light);
-    background-color: var(--glass-bg-light);
+    background-color: rgb(var(--glass-tint-light) / var(--glass-opacity));
     -webkit-backdrop-filter: blur(var(--glass-blur))
       saturate(var(--glass-saturation)) brightness(var(--glass-brightness));
     backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation))
@@ -284,14 +299,8 @@
   }
   .dark .liquid-glass {
     border-color: var(--glass-border-dark);
-    background-color: var(--glass-bg-dark);
+    background-color: rgb(var(--glass-tint-dark) / var(--glass-opacity));
     box-shadow: var(--glass-shadow-dark);
-  }
-  .liquid-glass-player {
-    background-color: var(--glass-player-light) !important;
-  }
-  .dark .liquid-glass-player {
-    background-color: var(--glass-player-dark) !important;
   }
 
   /* Windows-only experiment (Settings → Experiments → Liquid glass
@@ -315,16 +324,6 @@
       blur(var(--glass-blur)) saturate(var(--glass-saturation))
         brightness(var(--glass-brightness))
     );
-  }
-
-  /* Kube music-player parameter: Glass Background Opacity = 0.60. Scope it
-     to the Windows refraction experiment so disabling the toggle restores the
-     established classic-player tint (10%). */
-  .liquid-refract .liquid-glass-player {
-    background-color: var(--glass-bg-light) !important;
-  }
-  .dark.liquid-refract .liquid-glass-player {
-    background-color: var(--glass-bg-dark) !important;
   }
 }
 

@@ -3,7 +3,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { isWindowsWebview } from "@/lib/platform";
-import { isVisualThemeId, type VisualThemeId } from "@/lib/themes";
+import {
+  clampGlassBlur,
+  clampGlassOpacity,
+  GLASS_BLUR_DEFAULT,
+  GLASS_OPACITY_DEFAULT,
+  isVisualThemeId,
+  type VisualThemeId,
+} from "@/lib/themes";
 
 export type CloseButtonAction = "tray" | "quit";
 export type CacheAutoCleanPeriod = "off" | "daily" | "weekly" | "monthly";
@@ -23,6 +30,13 @@ type State = {
   /** The semantic visual child theme. Components consume the same token
    *  contract; this value only selects which token set is mounted. */
   visualTheme: VisualThemeId;
+  /** Alpha (0–1) of the shared glass tint every surface reads via
+   *  `--glass-opacity` — the "Frosted glass" slider. 0 = fully transparent
+   *  (frost only), 1 = opaque. See `useGlassOpacity`. */
+  glassOpacity: number;
+  /** Backdrop blur radius (px) of the shared glass material, via
+   *  `--glass-blur` — the "Glass blur" slider. See `useGlassBlur`. */
+  glassBlur: number;
   /** Experimental animated mesh derived from the current cover. When false,
    *  Ambient mode uses the original blurred-cover implementation. */
   dynamicAlbumMesh: boolean;
@@ -61,6 +75,8 @@ type State = {
   markCacheCleaned: () => void;
   setBackground: (v: BackgroundMode) => void;
   setVisualTheme: (v: VisualThemeId) => void;
+  setGlassOpacity: (v: number) => void;
+  setGlassBlur: (v: number) => void;
   setDynamicAlbumMesh: (v: boolean) => void;
   setLiquidGlassRefraction: (v: boolean) => void;
   setPlaybackNotifications: (v: boolean) => void;
@@ -87,7 +103,9 @@ export const useSettingsStore = create<State>()(
       cacheAutoClean: "off",
       lastCacheCleanAt: 0,
       background: "ambient",
-      visualTheme: "goosic",
+      visualTheme: "default",
+      glassOpacity: GLASS_OPACITY_DEFAULT,
+      glassBlur: GLASS_BLUR_DEFAULT,
       dynamicAlbumMesh: true,
       liquidGlassRefraction: true,
       playbackNotifications: false,
@@ -102,6 +120,8 @@ export const useSettingsStore = create<State>()(
       markCacheCleaned: () => set({ lastCacheCleanAt: Date.now() }),
       setBackground: (background) => set({ background }),
       setVisualTheme: (visualTheme) => set({ visualTheme }),
+      setGlassOpacity: (v) => set({ glassOpacity: clampGlassOpacity(v) }),
+      setGlassBlur: (v) => set({ glassBlur: clampGlassBlur(v) }),
       setDynamicAlbumMesh: (dynamicAlbumMesh) => set({ dynamicAlbumMesh }),
       setLiquidGlassRefraction: (liquidGlassRefraction) =>
         set({ liquidGlassRefraction }),
@@ -125,14 +145,28 @@ export const useSettingsStore = create<State>()(
     }),
     {
       name: "ytm-settings",
-      // Old installs may have no visualTheme yet, and corrupted/manual
-      // storage should never prevent settings from hydrating.
+      // Old installs may have no visualTheme yet — or a since-retired id
+      // (goosic/ocean/sunset/mono). `isVisualThemeId` now only accepts
+      // default/modern, so any legacy or corrupted value falls back to the
+      // current default rather than blocking hydration.
       merge: (persisted, current) => {
-        const value = (persisted as Partial<State> | undefined)?.visualTheme;
+        const saved = persisted as Partial<State> | undefined;
+        const value = saved?.visualTheme;
+        const savedOpacity = saved?.glassOpacity;
+        const savedBlur = saved?.glassBlur;
         return {
           ...current,
           ...(persisted as Partial<State>),
           visualTheme: isVisualThemeId(value) ? value : current.visualTheme,
+          // Missing on older installs; clamp anything out of range.
+          glassOpacity:
+            typeof savedOpacity === "number"
+              ? clampGlassOpacity(savedOpacity)
+              : current.glassOpacity,
+          glassBlur:
+            typeof savedBlur === "number"
+              ? clampGlassBlur(savedBlur)
+              : current.glassBlur,
         };
       },
     },

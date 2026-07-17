@@ -75,6 +75,7 @@ import {
 import { cn } from "@/lib/utils";
 import { startLogin } from "@/lib/login";
 import { APP_ICON, APP_NAME } from "@/lib/branding";
+import { GLASS_SURFACE_CLASS } from "@/components/ui/glass-surface";
 
 const NAV_ITEMS = [
   { to: "/", label: "Home", icon: HomeIcon },
@@ -100,7 +101,8 @@ export function AppSidebar() {
     <Sidebar
       variant="floating"
       collapsible="icon"
-      className="px-2 pb-2 pt-0 duration-300 ease-out [&>[data-slot=sidebar-inner]]:rounded-[34px] [&>[data-slot=sidebar-inner]]:bg-surface [&>[data-slot=sidebar-inner]]:shadow-none"
+      innerClassName={GLASS_SURFACE_CLASS}
+      className="px-2 pb-2 pt-0 duration-300 ease-out [&>[data-slot=sidebar-inner]]:rounded-[34px] [&>[data-slot=sidebar-inner]]:shadow-none"
     >
       <SidebarHeader className="flex-row items-center gap-2 px-4 pt-[18px] pb-2 group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:px-2">
         {/* Single round logo. In expanded mode it sits at px-4 to line

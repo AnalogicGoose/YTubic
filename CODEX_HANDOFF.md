@@ -5,8 +5,8 @@
 >
 > Last verified: **2026-07-16**
 > Current app version: **0.4.5**
-> Current `main`: **v0.4.5 release candidate with Figma Glass menu/player fixes**
-> Latest public release: <https://github.com/AnalogicGoose/Goosic/releases/tag/v0.4.3>
+> Current `main`: **post-v0.4.5 glass/theme and memory refinements**
+> Latest public release: <https://github.com/AnalogicGoose/Goosic/releases/tag/v0.4.5>
 
 ## 1. New-session quick start
 
@@ -230,8 +230,10 @@ window automatically appears in the other.
 - `src/lib/themes.ts` — the visual-theme registry and token applier. Themes
   are data-driven children of one shared visual contract; components should
   consume semantic Tailwind tokens/material variables instead of branching on
-  theme IDs. The current selector offers Goosic, Ocean, Sunset, and Mono and
-  persists to the `visualTheme` field in `ytm-settings`.
+  theme IDs. The current selector offers Default and Modern, which share the
+  same neutral tokens but select the classic or modern bottom-player layout.
+  The choice persists to the `visualTheme` field in `ytm-settings`; the shared
+  glass opacity and blur settings apply across the player, menus, and sidebar.
 - `src/lib/store/track-source.ts` — song/video source pairing and selection.
 - `src/lib/updater.ts` and `src/lib/store/update.ts` — update state machine.
 - `src/lib/lyrics/` — lyrics providers, matching, and LRC parsing.
@@ -449,10 +451,10 @@ production/Tauri build.
 
 All menus, popovers, dropdowns, and player surfaces share one material:
 `GLASS_SURFACE_CLASS` in `src/components/ui/glass-surface.ts`, backed by the
-`.liquid-glass` class in `src/index.css` (blur 26px + saturate + outline +
-drop shadow — the user explicitly removed inset specular/glow highlights;
-do not add those CSS inset shadows back). The Windows refraction experiment
-does include Kube's directional specular _map_ inside the SVG optics chain.
+`.liquid-glass` class in `src/index.css` (user-controlled blur + saturation +
+outline + drop shadow — the user explicitly removed inset specular/glow
+highlights; do not add those CSS inset shadows back). The opacity and blur
+settings apply to every shared glass surface, including the sidebar.
 
 On top of that, **Windows only** gets true backdrop refraction as an
 experiment (Settings → Experiments → "Liquid glass refraction",
@@ -467,18 +469,18 @@ experiment (Settings → Experiments → "Liquid glass refraction",
   `src/components/layout/liquid-glass-defs.tsx`. It independently implements
   the Kube article's convex-squircle/Snell-law pipeline: a 127-sample radial
   profile, rounded-rectangle vector field, 8-bit red/green displacement map,
-  directional specular map, and SVG blur/displacement/saturation/blend chain.
+  and SVG blur/displacement chain.
   A MutationObserver + ResizeObserver gives every live menu/player its own
   dimension-matched filter; fixed backdrop-filter images do not size
   themselves in Chromium. Detached portaled menus are unregistered.
-- The experiment uses the Kube music-player defaults: refractive index 1.5,
-  blur 1, specular opacity 0.4, specular saturation 6, refraction level 1, and
-  glass background opacity 0.6. The 0.6 player tint is experiment-only;
-  disabling it restores Goosic's classic 10% player tint.
-- Menus/popovers intentionally use a more legible optics preset than the
-  player: Gaussian blur 32 and refraction level 0.7. Without it, large cover
-  features stay sharp and visually swallow menu labels. Player parallax keeps
-  blur 1/refraction 1.
+- Refraction maps cap their longest raster edge at 512px, immediately release
+  temporary canvas buffers, and use a 16-entry LRU. Keep those bounds: the old
+  unbounded 1024px cache retained every resize geometry and could grow the
+  WebView2 renderer into multiple gigabytes. Do not restore the unused
+  specular PNG; the active filter never consumed it.
+- The shared Glass blur setting drives the Gaussian blur inside the Windows
+  SVG shader. Player refraction remains level 1; menus/popovers use 0.7 for
+  legibility. Shared tint opacity is controlled by the Frosted-glass setting.
 - The SVG host is mounted in AppShell for the main document. The floating player
   deliberately does not mount it: that separate WebView uses the classic static
   `blur(26px) saturate(1.9)` glass instead of duplicating the runtime SVG maps.
@@ -500,6 +502,12 @@ it retains the existing components and classic static web glass, avoiding a
 second animated mesh and runtime refraction compositor. Do not "optimize" the
 main window into opacity/visibility toggles — the compositor keeps animating
 hidden layers; unmounting is the point.
+
+The hidden Windows account session-keeper sets WebView2's supported memory
+usage target to `Low` after creation. This lets the runtime discard inactive
+renderer caches without suspending JavaScript, networking, navigation, or the
+periodic cookie refresh. Keep this scoped to the hidden keeper; the visible
+main and floating player WebViews remain at the normal target.
 
 ## 9. Branding
 
@@ -878,8 +886,8 @@ persisted and synchronized across native windows.
 
 At the time this document was last refreshed:
 
-- `v0.4.3` is public with Windows, Linux, and universal macOS artifacts.
-- `v0.4.5` is prepared for release. It includes the Figma Glass preset,
+- `v0.4.5` is public with Windows, Linux, and universal macOS artifacts. It
+  includes the Figma Glass preset,
   pixel-exact menu filters, capped refraction/dispersion, immersive player
   mode, and floating-player GPU safeguards. It also includes the Safari-
   identified macOS
@@ -891,11 +899,12 @@ At the time this document was last refreshed:
 - The Windows Liquid Glass experiment now uses dimension-matched Figma-style
   refraction/specular/dispersion filters with a safe WebView2 scale. Real
   WebView2 player, context-menu, Queue, and Lyrics checks passed.
-- The modular visual-theme foundation is now in place. Appearance exposes a
-  complete Interface style selector backed by `src/lib/themes.ts`; Goosic,
-  Ocean, Sunset, and Mono all share the same semantic component/material
-  contract and persist through `ytm-settings`. Future styles should be added
-  as registry children rather than copied component CSS.
+- The modular visual-theme foundation is now in place. Appearance exposes
+  Default and Modern styles backed by `src/lib/themes.ts`; they share one
+  neutral semantic component/material contract and select the classic or
+  modern bottom-player layout. Shared opacity and blur controls drive the
+  player, menus, and sidebar through `ytm-settings`. Future styles should be
+  added as registry children rather than copied component CSS.
 
 When this snapshot becomes stale, update this section, the header version, and
 the recent release history as part of the next release.

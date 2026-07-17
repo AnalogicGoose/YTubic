@@ -5,8 +5,17 @@ import { useEffect } from "react";
  * A theme is the "child" of the app's visual master component: it owns the
  * semantic color and material tokens while shared components continue to
  * consume `bg-background`, `text-foreground`, `liquid-glass`, etc.
+ *
+ * There are two themes, both mirrored from the Figma reference (frames
+ * "Default theme" and "Modern"). They share one dark/light token palette —
+ * the difference the design draws between them is the bottom player bar's
+ * arrangement, carried by the `playerLayout` field and consumed by
+ * `PlayerBarBottom`.
  */
-export type VisualThemeId = "goosic" | "ocean" | "sunset" | "mono";
+export type VisualThemeId = "default" | "modern";
+
+/** How the bottom player bar arranges its sections (see Figma frames). */
+export type PlayerLayout = "classic" | "modern";
 
 type ThemeTokens = Record<string, string>;
 
@@ -14,6 +23,8 @@ export type VisualThemeDefinition = {
   id: VisualThemeId;
   label: string;
   description: string;
+  /** Bottom-bar arrangement this theme mounts. */
+  playerLayout: PlayerLayout;
   swatches: readonly [string, string, string];
   light: ThemeTokens;
   dark: ThemeTokens;
@@ -54,17 +65,20 @@ const COMMON_DARK = {
 };
 
 const MATERIALS = {
-  "--glass-blur": "26px",
-  "--glass-saturation": "190%",
+  "--glass-saturation": "120%",
   "--glass-brightness": "1.04",
-  "--glass-bg-light": "rgba(255, 255, 255, 0.55)",
-  "--glass-bg-dark": "rgba(32, 32, 36, 0.52)",
-  "--glass-border-light": "rgba(255, 255, 255, 0.45)",
-  "--glass-border-dark": "rgba(255, 255, 255, 0.18)",
+  // One glass material for every surface (player, menus, popovers, cards).
+  // The tint is just an RGB triple; the alpha is a single user-controlled
+  // `--glass-opacity` (see `useGlassOpacity` / the Frosted-glass slider),
+  // so nothing overrides anyone — surfaces share the exact same recipe.
+  "--glass-tint-light": "255 255 255",
+  "--glass-tint-dark": "32 32 36",
+  // Kept intentionally faint so the panel edge reads as a hairline, not a
+  // bright white outline (the "white look" we're removing).
+  "--glass-border-light": "rgba(255, 255, 255, 0.30)",
+  "--glass-border-dark": "rgba(255, 255, 255, 0.07)",
   "--glass-shadow-light": "0 12px 48px rgba(0, 0, 0, 0.28)",
   "--glass-shadow-dark": "0 12px 48px rgba(0, 0, 0, 0.5)",
-  "--glass-player-light": "rgba(255, 255, 255, 0.10)",
-  "--glass-player-dark": "rgba(32, 32, 36, 0.10)",
   "--app-font-family":
     "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif",
   "--radius": "34px",
@@ -79,210 +93,69 @@ const makeTokens = (
   ...values,
 });
 
+const NEUTRAL_LIGHT: ThemeTokens = {
+  "--brand": "#fa1f3e",
+  "--background": "oklch(1 0 0)",
+  "--foreground": "oklch(0.145 0 0)",
+  "--card": "oklch(1 0 0)",
+  "--card-foreground": "oklch(0.145 0 0)",
+  "--popover": "oklch(1 0 0)",
+  "--popover-foreground": "oklch(0.145 0 0)",
+  "--secondary": "oklch(0.97 0 0)",
+  "--secondary-foreground": "oklch(0.205 0 0)",
+  "--muted": "oklch(0.97 0 0)",
+  "--muted-foreground": "oklch(0.556 0 0)",
+  "--accent": "oklch(0.97 0 0)",
+  "--accent-foreground": "oklch(0.205 0 0)",
+  "--sidebar": "oklch(0.985 0 0)",
+  "--sidebar-foreground": "oklch(0.145 0 0)",
+  "--sidebar-primary": "var(--brand)",
+  "--sidebar-primary-foreground": "var(--brand-foreground)",
+  "--sidebar-accent": "oklch(0.97 0 0)",
+  "--sidebar-accent-foreground": "oklch(0.205 0 0)",
+};
+
+const NEUTRAL_DARK: ThemeTokens = {
+  "--brand": "#fa1f3e",
+  "--background": "oklch(0.145 0 0)",
+  "--foreground": "oklch(0.985 0 0)",
+  "--card": "oklch(0.205 0 0)",
+  "--card-foreground": "oklch(0.985 0 0)",
+  "--popover": "oklch(0.205 0 0)",
+  "--popover-foreground": "oklch(0.985 0 0)",
+  "--secondary": "oklch(0.269 0 0)",
+  "--secondary-foreground": "oklch(0.985 0 0)",
+  "--muted": "oklch(0.269 0 0)",
+  "--muted-foreground": "oklch(0.708 0 0)",
+  "--accent": "oklch(1 0 0 / 10%)",
+  "--accent-foreground": "oklch(0.985 0 0)",
+  "--sidebar": "oklch(0.205 0 0)",
+  "--sidebar-foreground": "oklch(0.985 0 0)",
+  "--sidebar-primary": "var(--brand)",
+  "--sidebar-primary-foreground": "var(--brand-foreground)",
+  "--sidebar-accent": "oklch(1 0 0 / 10%)",
+  "--sidebar-accent-foreground": "oklch(0.985 0 0)",
+};
+
 export const VISUAL_THEMES: readonly VisualThemeDefinition[] = [
   {
-    id: "goosic",
-    label: "Goosic",
-    description: "The original red accent and neutral glass material.",
+    id: "default",
+    label: "Default",
+    description: "Album art and metadata lead, with the transport centered.",
+    playerLayout: "classic",
     swatches: ["#fa1f3e", "#19191d", "#f5f5f5"],
-    light: makeTokens("light", {
-      "--brand": "#fa1f3e",
-      "--background": "oklch(1 0 0)",
-      "--foreground": "oklch(0.145 0 0)",
-      "--card": "oklch(1 0 0)",
-      "--card-foreground": "oklch(0.145 0 0)",
-      "--popover": "oklch(1 0 0)",
-      "--popover-foreground": "oklch(0.145 0 0)",
-      "--secondary": "oklch(0.97 0 0)",
-      "--secondary-foreground": "oklch(0.205 0 0)",
-      "--muted": "oklch(0.97 0 0)",
-      "--muted-foreground": "oklch(0.556 0 0)",
-      "--accent": "oklch(0.97 0 0)",
-      "--accent-foreground": "oklch(0.205 0 0)",
-      "--sidebar": "oklch(0.985 0 0)",
-      "--sidebar-foreground": "oklch(0.145 0 0)",
-      "--sidebar-primary": "var(--brand)",
-      "--sidebar-primary-foreground": "var(--brand-foreground)",
-      "--sidebar-accent": "oklch(0.97 0 0)",
-      "--sidebar-accent-foreground": "oklch(0.205 0 0)",
-    }),
-    dark: makeTokens("dark", {
-      "--brand": "#fa1f3e",
-      "--background": "oklch(0.145 0 0)",
-      "--foreground": "oklch(0.985 0 0)",
-      "--card": "oklch(0.205 0 0)",
-      "--card-foreground": "oklch(0.985 0 0)",
-      "--popover": "oklch(0.205 0 0)",
-      "--popover-foreground": "oklch(0.985 0 0)",
-      "--secondary": "oklch(0.269 0 0)",
-      "--secondary-foreground": "oklch(0.985 0 0)",
-      "--muted": "oklch(0.269 0 0)",
-      "--muted-foreground": "oklch(0.708 0 0)",
-      "--accent": "oklch(1 0 0 / 10%)",
-      "--accent-foreground": "oklch(0.985 0 0)",
-      "--sidebar": "oklch(0.205 0 0)",
-      "--sidebar-foreground": "oklch(0.985 0 0)",
-      "--sidebar-primary": "var(--brand)",
-      "--sidebar-primary-foreground": "var(--brand-foreground)",
-      "--sidebar-accent": "oklch(1 0 0 / 10%)",
-      "--sidebar-accent-foreground": "oklch(0.985 0 0)",
-    }),
+    light: makeTokens("light", NEUTRAL_LIGHT),
+    dark: makeTokens("dark", NEUTRAL_DARK),
   },
   {
-    id: "ocean",
-    label: "Ocean",
-    description: "Cool cyan accents with a deep blue glass atmosphere.",
-    swatches: ["#19b7d8", "#10232e", "#e8fbff"],
-    light: makeTokens("light", {
-      "--brand": "#0891b2",
-      "--background": "oklch(0.98 0.012 215)",
-      "--foreground": "oklch(0.2 0.03 220)",
-      "--card": "oklch(0.99 0.008 215)",
-      "--card-foreground": "oklch(0.2 0.03 220)",
-      "--popover": "oklch(0.99 0.008 215)",
-      "--popover-foreground": "oklch(0.2 0.03 220)",
-      "--secondary": "oklch(0.94 0.025 210)",
-      "--secondary-foreground": "oklch(0.25 0.04 220)",
-      "--muted": "oklch(0.94 0.025 210)",
-      "--muted-foreground": "oklch(0.48 0.04 220)",
-      "--accent": "oklch(0.93 0.045 205)",
-      "--accent-foreground": "oklch(0.22 0.05 220)",
-      "--sidebar": "oklch(0.96 0.025 215)",
-      "--sidebar-foreground": "oklch(0.2 0.03 220)",
-      "--sidebar-primary": "var(--brand)",
-      "--sidebar-primary-foreground": "var(--brand-foreground)",
-      "--sidebar-accent": "oklch(0.93 0.045 205)",
-      "--sidebar-accent-foreground": "oklch(0.22 0.05 220)",
-      "--glass-bg-light": "rgba(225, 249, 255, 0.58)",
-      "--glass-border-light": "rgba(120, 215, 235, 0.42)",
-    }),
-    dark: makeTokens("dark", {
-      "--brand": "#22d3ee",
-      "--background": "oklch(0.14 0.035 220)",
-      "--foreground": "oklch(0.96 0.02 210)",
-      "--card": "oklch(0.19 0.04 220)",
-      "--card-foreground": "oklch(0.96 0.02 210)",
-      "--popover": "oklch(0.19 0.04 220)",
-      "--popover-foreground": "oklch(0.96 0.02 210)",
-      "--secondary": "oklch(0.25 0.05 220)",
-      "--secondary-foreground": "oklch(0.96 0.02 210)",
-      "--muted": "oklch(0.25 0.05 220)",
-      "--muted-foreground": "oklch(0.72 0.04 210)",
-      "--accent": "oklch(0.32 0.07 215 / 70%)",
-      "--accent-foreground": "oklch(0.98 0.01 210)",
-      "--sidebar": "oklch(0.17 0.045 220)",
-      "--sidebar-foreground": "oklch(0.96 0.02 210)",
-      "--sidebar-primary": "var(--brand)",
-      "--sidebar-primary-foreground": "var(--brand-foreground)",
-      "--sidebar-accent": "oklch(0.32 0.07 215 / 70%)",
-      "--sidebar-accent-foreground": "oklch(0.98 0.01 210)",
-      "--glass-bg-dark": "rgba(10, 33, 45, 0.58)",
-      "--glass-border-dark": "rgba(128, 229, 244, 0.24)",
-      "--glass-player-dark": "rgba(10, 33, 45, 0.10)",
-    }),
-  },
-  {
-    id: "sunset",
-    label: "Sunset",
-    description: "Warm coral and violet accents for a softer atmosphere.",
-    swatches: ["#f97362", "#321d2e", "#fff0e7"],
-    light: makeTokens("light", {
-      "--brand": "#e85d4a",
-      "--background": "oklch(0.985 0.012 45)",
-      "--foreground": "oklch(0.2 0.025 340)",
-      "--card": "oklch(0.995 0.008 45)",
-      "--card-foreground": "oklch(0.2 0.025 340)",
-      "--popover": "oklch(0.995 0.008 45)",
-      "--popover-foreground": "oklch(0.2 0.025 340)",
-      "--secondary": "oklch(0.95 0.025 45)",
-      "--secondary-foreground": "oklch(0.28 0.04 340)",
-      "--muted": "oklch(0.95 0.025 45)",
-      "--muted-foreground": "oklch(0.5 0.04 340)",
-      "--accent": "oklch(0.94 0.05 35)",
-      "--accent-foreground": "oklch(0.25 0.04 340)",
-      "--sidebar": "oklch(0.97 0.02 40)",
-      "--sidebar-foreground": "oklch(0.2 0.025 340)",
-      "--sidebar-primary": "var(--brand)",
-      "--sidebar-primary-foreground": "var(--brand-foreground)",
-      "--sidebar-accent": "oklch(0.94 0.05 35)",
-      "--sidebar-accent-foreground": "oklch(0.25 0.04 340)",
-      "--glass-bg-light": "rgba(255, 242, 233, 0.58)",
-      "--glass-border-light": "rgba(245, 145, 122, 0.38)",
-    }),
-    dark: makeTokens("dark", {
-      "--brand": "#fb7185",
-      "--background": "oklch(0.14 0.035 340)",
-      "--foreground": "oklch(0.97 0.015 45)",
-      "--card": "oklch(0.2 0.045 340)",
-      "--card-foreground": "oklch(0.97 0.015 45)",
-      "--popover": "oklch(0.2 0.045 340)",
-      "--popover-foreground": "oklch(0.97 0.015 45)",
-      "--secondary": "oklch(0.27 0.055 340)",
-      "--secondary-foreground": "oklch(0.97 0.015 45)",
-      "--muted": "oklch(0.27 0.055 340)",
-      "--muted-foreground": "oklch(0.74 0.04 35)",
-      "--accent": "oklch(0.34 0.08 350 / 70%)",
-      "--accent-foreground": "oklch(0.99 0.01 45)",
-      "--sidebar": "oklch(0.18 0.05 340)",
-      "--sidebar-foreground": "oklch(0.97 0.015 45)",
-      "--sidebar-primary": "var(--brand)",
-      "--sidebar-primary-foreground": "var(--brand-foreground)",
-      "--sidebar-accent": "oklch(0.34 0.08 350 / 70%)",
-      "--sidebar-accent-foreground": "oklch(0.99 0.01 45)",
-      "--glass-bg-dark": "rgba(49, 27, 43, 0.58)",
-      "--glass-border-dark": "rgba(255, 158, 150, 0.24)",
-      "--glass-player-dark": "rgba(49, 27, 43, 0.10)",
-    }),
-  },
-  {
-    id: "mono",
-    label: "Mono",
-    description: "A quiet monochrome interface that lets album art lead.",
-    swatches: ["#a1a1aa", "#18181b", "#fafafa"],
-    light: makeTokens("light", {
-      "--brand": "#52525b",
-      "--background": "oklch(0.985 0 0)",
-      "--foreground": "oklch(0.2 0 0)",
-      "--card": "oklch(1 0 0)",
-      "--card-foreground": "oklch(0.2 0 0)",
-      "--popover": "oklch(1 0 0)",
-      "--popover-foreground": "oklch(0.2 0 0)",
-      "--secondary": "oklch(0.94 0 0)",
-      "--secondary-foreground": "oklch(0.25 0 0)",
-      "--muted": "oklch(0.94 0 0)",
-      "--muted-foreground": "oklch(0.5 0 0)",
-      "--accent": "oklch(0.91 0 0)",
-      "--accent-foreground": "oklch(0.2 0 0)",
-      "--sidebar": "oklch(0.95 0 0)",
-      "--sidebar-foreground": "oklch(0.2 0 0)",
-      "--sidebar-primary": "var(--brand)",
-      "--sidebar-primary-foreground": "var(--brand-foreground)",
-      "--sidebar-accent": "oklch(0.91 0 0)",
-      "--sidebar-accent-foreground": "oklch(0.2 0 0)",
-    }),
-    dark: makeTokens("dark", {
-      "--brand": "#d4d4d8",
-      "--background": "oklch(0.12 0 0)",
-      "--foreground": "oklch(0.96 0 0)",
-      "--card": "oklch(0.18 0 0)",
-      "--card-foreground": "oklch(0.96 0 0)",
-      "--popover": "oklch(0.18 0 0)",
-      "--popover-foreground": "oklch(0.96 0 0)",
-      "--secondary": "oklch(0.25 0 0)",
-      "--secondary-foreground": "oklch(0.96 0 0)",
-      "--muted": "oklch(0.25 0 0)",
-      "--muted-foreground": "oklch(0.7 0 0)",
-      "--accent": "oklch(0.34 0 0 / 70%)",
-      "--accent-foreground": "oklch(0.98 0 0)",
-      "--sidebar": "oklch(0.16 0 0)",
-      "--sidebar-foreground": "oklch(0.96 0 0)",
-      "--sidebar-primary": "var(--brand)",
-      "--sidebar-primary-foreground": "var(--brand-foreground)",
-      "--sidebar-accent": "oklch(0.34 0 0 / 70%)",
-      "--sidebar-accent-foreground": "oklch(0.98 0 0)",
-      "--glass-bg-dark": "rgba(28, 28, 31, 0.58)",
-      "--glass-border-dark": "rgba(255, 255, 255, 0.22)",
-    }),
+    id: "modern",
+    label: "Modern",
+    description:
+      "A compact bar: transport on the left, now-playing centered above the scrubber.",
+    playerLayout: "modern",
+    swatches: ["#fa1f3e", "#19191d", "#f5f5f5"],
+    light: makeTokens("light", NEUTRAL_LIGHT),
+    dark: makeTokens("dark", NEUTRAL_DARK),
   },
 ];
 
@@ -320,4 +193,54 @@ export function useVisualTheme(id: VisualThemeId): void {
     observer.observe(root, { attributes: true, attributeFilter: ["class"] });
     return () => observer.disconnect();
   }, [id]);
+}
+
+/** Slider bounds for the shared glass tint alpha (transparent → opaque). */
+export const GLASS_OPACITY_MIN = 0;
+export const GLASS_OPACITY_MAX = 1;
+export const GLASS_OPACITY_DEFAULT = 0.52;
+
+export function clampGlassOpacity(value: number): number {
+  if (!Number.isFinite(value)) return GLASS_OPACITY_DEFAULT;
+  return Math.min(GLASS_OPACITY_MAX, Math.max(GLASS_OPACITY_MIN, value));
+}
+
+/** Slider bounds for the shared backdrop blur radius, in pixels. */
+export const GLASS_BLUR_MIN = 0;
+export const GLASS_BLUR_MAX = 60;
+export const GLASS_BLUR_DEFAULT = 26;
+
+export function clampGlassBlur(value: number): number {
+  if (!Number.isFinite(value)) return GLASS_BLUR_DEFAULT;
+  return Math.round(Math.min(GLASS_BLUR_MAX, Math.max(GLASS_BLUR_MIN, value)));
+}
+
+/**
+ * Drive the single `--glass-opacity` variable every glass surface reads.
+ * Kept separate from `applyVisualTheme` on purpose: theme/light-dark changes
+ * must never clobber the user's chosen frostiness. Mounted alongside
+ * `useVisualTheme` so it applies in both the main and floating windows.
+ */
+export function useGlassOpacity(opacity: number): void {
+  useEffect(() => {
+    document.documentElement.style.setProperty(
+      "--glass-opacity",
+      String(clampGlassOpacity(opacity)),
+    );
+  }, [opacity]);
+}
+
+/**
+ * Drive the shared `--glass-blur` radius every glass surface reads. Kept out
+ * of `applyVisualTheme` (same reasoning as `useGlassOpacity`) so switching
+ * theme or light/dark never resets the user's chosen blur. Mounted in both
+ * the main and floating windows.
+ */
+export function useGlassBlur(blurPx: number): void {
+  useEffect(() => {
+    document.documentElement.style.setProperty(
+      "--glass-blur",
+      `${clampGlassBlur(blurPx)}px`,
+    );
+  }, [blurPx]);
 }

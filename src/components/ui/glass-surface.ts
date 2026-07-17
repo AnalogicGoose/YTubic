@@ -4,8 +4,11 @@ import { isLinuxWebview } from "@/lib/platform";
 // the blur-dependent variants below are skipped entirely rather than
 // picked by a `supports-[backdrop-filter]` query that misfires there —
 // falling through to this opaque-enough-on-its-own base instead.
+// No inset highlights — just a soft outer drop shadow. The old inset
+// top-edge glow (white in dark mode) read as a harsh rim the design didn't
+// want; every glass surface now stays flat-faced.
 const BASE_SURFACE_CLASS =
-  "relative isolate border-border bg-background/90 text-foreground shadow-[inset_0_40px_10px_-40px_rgba(40,40,40,0.34),inset_0_-40px_10px_-40px_rgba(40,40,40,0.2),0_8px_48px_rgba(0,0,0,0.25)] dark:shadow-[inset_0_40px_10px_-40px_rgba(255,255,255,0.16),inset_0_-40px_10px_-40px_rgba(0,0,0,0.55),0_8px_48px_rgba(0,0,0,0.45)]";
+  "relative isolate border-border bg-background/90 text-foreground shadow-[0_8px_48px_rgba(0,0,0,0.25)] dark:shadow-[0_8px_48px_rgba(0,0,0,0.45)]";
 
 const blurRenders = !isLinuxWebview();
 
@@ -26,6 +29,17 @@ export const GLASS_SURFACE_CLASS = blurRenders
 // The Tailwind bg-* utilities override .liquid-glass's background-color
 // (utilities layer wins over the base-layer class), keeping the documented
 // 10% player tint.
+// Every glass surface now shares ONE material: the same `.liquid-glass`
+// tint + blur, with a single user-tunable `--glass-opacity`. The player
+// keeps the extra `liquid-glass-player` marker, but that no longer changes
+// its background — it's only a hint to the Windows refraction lens
+// (liquid-glass-defs.tsx) so the moving player gets its bolder optics while
+// menus stay calm and legible.
 export const PLAYER_GLASS_SURFACE_CLASS = blurRenders
   ? `${GLASS_SURFACE_CLASS} liquid-glass-player`
   : BASE_SURFACE_CLASS;
+
+// Menus, dropdowns and popovers use the shared surface unchanged — no
+// per-surface tint override, so they track the Frosted-glass slider like
+// everything else.
+export const MENU_GLASS_SURFACE_CLASS = GLASS_SURFACE_CLASS;

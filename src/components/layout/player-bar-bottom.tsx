@@ -11,6 +11,7 @@ import {
   RadioIcon,
 } from "lucide-react";
 import { useState } from "react";
+import { motion } from "motion/react";
 import { useShallow } from "zustand/react/shallow";
 import {
   Popover,
@@ -45,6 +46,8 @@ import { PLAYER_GLASS_SURFACE_CLASS } from "@/components/ui/glass-surface";
 import { cn } from "@/lib/utils";
 import { usePlayerCoverDrag } from "@/lib/player-drag";
 import { usePlaybackStore, currentTrack } from "@/lib/store/playback";
+import { useSettingsStore } from "@/lib/store/settings";
+import { getVisualTheme } from "@/lib/themes";
 
 /**
  * Compact horizontal player bar pinned to the bottom of the content
@@ -105,6 +108,230 @@ export function PlayerBarBottom({
   // loader where a Play icon should be.
   const loading = status === "loading" && playing;
 
+  // The bottom bar mirrors two Figma frames. "classic" (Default theme):
+  // cover + meta on the left, transport centered, secondary actions right,
+  // progress on a full-width row beneath. "modern": transport pinned left,
+  // now-playing centered *above* the scrubber, secondary actions right —
+  // one compact row. Both reuse the exact same controls below.
+  const visualTheme = useSettingsStore((s) => s.visualTheme);
+  const modern = getVisualTheme(visualTheme).playerLayout === "modern";
+
+  // Cover doubles as a drag handle / full-screen affordance. Shared by
+  // both layouts; only the size + corner radius differ.
+  const cover = (size: string, circle: boolean) => (
+    <div
+      onPointerDown={onCoverPointerDown}
+      role={onCoverActivate ? "button" : undefined}
+      aria-label={onCoverActivate ? "Open full-screen player" : undefined}
+      tabIndex={onCoverActivate ? 0 : undefined}
+      onKeyDown={(event) => {
+        if (!onCoverActivate) return;
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onCoverActivate();
+        }
+      }}
+      className="shrink-0 touch-none select-none cursor-grab active:cursor-grabbing focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+    >
+      {track ? (
+        <Thumbnail
+          thumbnails={track.thumbnails}
+          alt={track.title}
+          className={cn(
+            size,
+            "shrink-0 border border-hairline pointer-events-none",
+            circle ? "rounded-full" : "rounded-md",
+          )}
+          targetSize={256}
+          highRes
+          overrideHighRes={iTunesCover}
+        />
+      ) : (
+        <div
+          className={cn(
+            size,
+            "shrink-0 border border-hairline bg-muted",
+            circle ? "rounded-full" : "rounded-md",
+          )}
+        />
+      )}
+    </div>
+  );
+
+  // shuffle | prev | PLAY | next | repeat — identical in both layouts.
+  const transport = (
+    <div className="flex shrink-0 items-center gap-1">
+      <Button
+        variant="ghost"
+        size="icon"
+        aria-label="Shuffle"
+        aria-pressed={shuffle}
+        onClick={() => setShuffle(!shuffle)}
+        className={cn(shuffle && "text-brand")}
+      >
+        <ShuffleIcon />
+      </Button>
+      <Button
+        variant="ghost"
+        size="icon"
+        aria-label="Previous"
+        onClick={prev}
+        disabled={!hasTrack}
+      >
+        <SkipBackIcon className="fill-current" />
+      </Button>
+      <Button
+        size="icon"
+        aria-label={playing ? "Pause" : "Play"}
+        onClick={toggle}
+        disabled={!hasTrack}
+        className="size-12 rounded-full bg-brand text-white hover:bg-brand/90"
+      >
+        {loading ? (
+          <Loader2Icon className="animate-spin" />
+        ) : playing ? (
+          <PauseIcon className="size-5 fill-current" />
+        ) : (
+          <PlayIcon className="size-5 fill-current" />
+        )}
+      </Button>
+      <Button
+        variant="ghost"
+        size="icon"
+        aria-label="Next"
+        onClick={next}
+        disabled={!hasTrack}
+      >
+        <SkipForwardIcon className="fill-current" />
+      </Button>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label={repeatLabel(repeat)}
+            aria-pressed={repeat !== "off"}
+            onClick={cycleRepeat}
+            className={cn(repeat !== "off" && "text-brand")}
+          >
+            {repeat === "one" ? <Repeat1Icon /> : <RepeatIcon />}
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{repeatLabel(repeat)}</TooltipContent>
+      </Tooltip>
+    </div>
+  );
+
+  // like | lyrics | autoplay | queue | volume | more — identical in both.
+  const extras = (
+    <div className="flex shrink-0 items-center justify-end gap-0.5">
+      {track ? (
+        <LikeDislikeButtons videoId={track.videoId} track={track} />
+      ) : null}
+      <LyricsPopover state={lyricsState} />
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label="Autoplay"
+            aria-pressed={autoRadio}
+            onClick={() => setAutoRadio(!autoRadio)}
+            className={cn(autoRadio && "text-brand")}
+          >
+            <RadioIcon />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent side="bottom">Autoplay</TooltipContent>
+      </Tooltip>
+      <QueuePopover />
+      <VolumeControl direction="vertical" />
+      <PlayerMoreMenu track={track} />
+    </div>
+  );
+
+  const progress = (
+    <div className="flex w-full items-center gap-2">
+      <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+        {formatTime(scrub ?? position)}
+      </span>
+      <div className="min-w-0 flex-1">
+        <ProgressSlider
+          position={position}
+          duration={duration}
+          scrub={scrub}
+          setScrub={setScrub}
+          seek={seek}
+          disabled={!hasTrack || duration <= 0}
+        />
+      </div>
+      <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+        {formatTime(duration)}
+      </span>
+    </div>
+  );
+
+  const errorBanner =
+    status === "error" && error ? (
+      <div className="absolute -top-9 left-3 right-3 truncate rounded-md bg-destructive/90 px-3 py-1 text-xs text-destructive-foreground shadow">
+        Playback error: {error}
+      </div>
+    ) : null;
+
+  if (modern) {
+    return (
+      <TooltipProvider delayDuration={800} skipDelayDuration={0}>
+        <aside
+          className={cn(
+            PLAYER_GLASS_SURFACE_CLASS,
+            "absolute inset-x-0 bottom-0 z-30 mr-2 mb-2 flex items-center gap-4 rounded-[999px] border px-4 py-2.5",
+          )}
+        >
+          {errorBanner}
+          {/* Fade the swapped layout in when the theme changes. */}
+          <motion.div
+            key="modern"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.18 }}
+            className="flex w-full items-center gap-4"
+          >
+            {/* LEFT: transport, pinned to the bar's start. */}
+            {transport}
+
+            {/* CENTER: now-playing stacked above the scrubber, centered in
+              the remaining space. `min-w-0` lets the title truncate. */}
+            <div className="flex min-w-0 flex-1 flex-col items-center gap-1">
+              <div className="flex min-w-0 max-w-full items-center gap-2">
+                {cover("size-9", true)}
+                <div className="flex min-w-0 flex-col">
+                  <span className="truncate text-sm font-semibold leading-tight">
+                    {track?.title ?? "Nothing playing"}
+                  </span>
+                  {track ? (
+                    <ArtistLinks
+                      artists={track.artists}
+                      fallback={track.subtitle ?? ""}
+                      className="truncate text-xs text-muted-foreground leading-tight"
+                    />
+                  ) : (
+                    <span className="truncate text-xs text-muted-foreground leading-tight">
+                      Pick a track to start
+                    </span>
+                  )}
+                </div>
+              </div>
+              {progress}
+            </div>
+
+            {/* RIGHT: secondary actions, justified to the bar's end. */}
+            {extras}
+          </motion.div>
+        </aside>
+      </TooltipProvider>
+    );
+  }
+
   return (
     // The compound selector at the end overrides shadcn's ghost-variant
     // gray hover (`hover:bg-accent`) for every Button rendered inside
@@ -131,178 +358,56 @@ export function PlayerBarBottom({
           "absolute inset-x-0 bottom-0 z-30 mr-2 mb-2 flex flex-col gap-2 rounded-[34px] border px-4 py-3",
         )}
       >
-        {status === "error" && error ? (
-          <div className="absolute -top-9 left-3 right-3 truncate rounded-md bg-destructive/90 px-3 py-1 text-xs text-destructive-foreground shadow">
-            Playback error: {error}
-          </div>
-        ) : null}
+        {errorBanner}
 
-        {/* Top row — three sections separated by `flex-1` wings so the
-          transport cluster always lands centered in the bar. */}
-        <div className="flex items-center gap-4">
-          {/* LEFT wing: cover + meta. `min-w-0` lets the title truncate
-            instead of pushing the transport cluster off-center. */}
-          <div className="flex min-w-0 flex-1 items-center gap-3">
-            <div
-              onPointerDown={onCoverPointerDown}
-              role={onCoverActivate ? "button" : undefined}
-              aria-label={
-                onCoverActivate ? "Open full-screen player" : undefined
-              }
-              tabIndex={onCoverActivate ? 0 : undefined}
-              onKeyDown={(event) => {
-                if (!onCoverActivate) return;
-                if (event.key === "Enter" || event.key === " ") {
-                  event.preventDefault();
-                  onCoverActivate();
-                }
-              }}
-              className="shrink-0 touch-none select-none cursor-grab active:cursor-grabbing focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
-            >
-              {track ? (
-                <Thumbnail
-                  thumbnails={track.thumbnails}
-                  alt={track.title}
-                  className="size-14 shrink-0 rounded-md border border-hairline pointer-events-none"
-                  targetSize={256}
-                  highRes
-                  overrideHighRes={iTunesCover}
-                />
-              ) : (
-                <div className="size-14 shrink-0 rounded-md border border-hairline bg-muted" />
-              )}
-            </div>
-            <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-              <span className="truncate text-base font-semibold leading-tight">
-                {track?.title ?? "Nothing playing"}
-              </span>
-              {track ? (
-                <ArtistLinks
-                  artists={track.artists}
-                  fallback={track.subtitle ?? ""}
-                  className="truncate text-sm text-muted-foreground leading-tight"
-                />
-              ) : (
-                <span className="truncate text-sm text-muted-foreground leading-tight">
-                  Pick a track to start
+        {/* Fade the swapped layout in when the theme changes. */}
+        <motion.div
+          key="classic"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ duration: 0.18 }}
+          className="flex flex-col gap-2"
+        >
+          {/* Top row — three sections separated by `flex-1` wings so the
+            transport cluster always lands centered in the bar. */}
+          <div className="flex items-center gap-4">
+            {/* LEFT wing: cover + meta. `min-w-0` lets the title truncate
+              instead of pushing the transport cluster off-center. */}
+            <div className="flex min-w-0 flex-1 items-center gap-3">
+              {cover("size-14", false)}
+              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                <span className="truncate text-base font-semibold leading-tight">
+                  {track?.title ?? "Nothing playing"}
                 </span>
-              )}
+                {track ? (
+                  <ArtistLinks
+                    artists={track.artists}
+                    fallback={track.subtitle ?? ""}
+                    className="truncate text-sm text-muted-foreground leading-tight"
+                  />
+                ) : (
+                  <span className="truncate text-sm text-muted-foreground leading-tight">
+                    Pick a track to start
+                  </span>
+                )}
+              </div>
             </div>
+
+            {/* CENTER: transport. Intrinsic width (no flex-1) so the
+              flex-1 wings push it to the middle. */}
+            {transport}
+
+            {/* RIGHT wing: secondary actions, justified to the right edge. */}
+            <div className="flex min-w-0 flex-1 justify-end">{extras}</div>
           </div>
 
-          {/* CENTER: shuffle | prev | PLAY | next | repeat. Width is
-            implicit (no flex-1) so the wings push it to the middle. */}
-          <div className="flex shrink-0 items-center gap-1">
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label="Shuffle"
-              aria-pressed={shuffle}
-              onClick={() => setShuffle(!shuffle)}
-              className={cn(shuffle && "text-brand")}
-            >
-              <ShuffleIcon />
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label="Previous"
-              onClick={prev}
-              disabled={!hasTrack}
-            >
-              <SkipBackIcon className="fill-current" />
-            </Button>
-            <Button
-              size="icon"
-              aria-label={playing ? "Pause" : "Play"}
-              onClick={toggle}
-              disabled={!hasTrack}
-              className="size-12 rounded-full bg-brand text-white hover:bg-brand/90"
-            >
-              {loading ? (
-                <Loader2Icon className="animate-spin" />
-              ) : playing ? (
-                <PauseIcon className="size-5 fill-current" />
-              ) : (
-                <PlayIcon className="size-5 fill-current" />
-              )}
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label="Next"
-              onClick={next}
-              disabled={!hasTrack}
-            >
-              <SkipForwardIcon className="fill-current" />
-            </Button>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  aria-label={repeatLabel(repeat)}
-                  aria-pressed={repeat !== "off"}
-                  onClick={cycleRepeat}
-                  className={cn(repeat !== "off" && "text-brand")}
-                >
-                  {repeat === "one" ? <Repeat1Icon /> : <RepeatIcon />}
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>{repeatLabel(repeat)}</TooltipContent>
-            </Tooltip>
-          </div>
-
-          {/* RIGHT wing: secondary actions, justified to the right edge. */}
-          <div className="flex flex-1 items-center justify-end gap-0.5">
-            {track ? (
-              <LikeDislikeButtons videoId={track.videoId} track={track} />
-            ) : null}
-            <LyricsPopover state={lyricsState} />
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  aria-label="Autoplay"
-                  aria-pressed={autoRadio}
-                  onClick={() => setAutoRadio(!autoRadio)}
-                  className={cn(autoRadio && "text-brand")}
-                >
-                  <RadioIcon />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="bottom">Autoplay</TooltipContent>
-            </Tooltip>
-            <QueuePopover />
-            <VolumeControl direction="vertical" />
-            <PlayerMoreMenu track={track} />
-          </div>
-        </div>
-
-        {/* Progress row — times sit at the bar's edges (intrinsic
-          widths, no padding inside their boxes) so the LEFT time
-          starts exactly under cover-left and the RIGHT time ends
-          exactly under more-right. The slider fills whatever's left
-          between them. */}
-        <div className="flex items-center gap-2">
-          <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
-            {formatTime(scrub ?? position)}
-          </span>
-          <div className="min-w-0 flex-1">
-            <ProgressSlider
-              position={position}
-              duration={duration}
-              scrub={scrub}
-              setScrub={setScrub}
-              seek={seek}
-              disabled={!hasTrack || duration <= 0}
-            />
-          </div>
-          <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
-            {formatTime(duration)}
-          </span>
-        </div>
+          {/* Progress row — times sit at the bar's edges (intrinsic
+            widths, no padding inside their boxes) so the LEFT time
+            starts exactly under cover-left and the RIGHT time ends
+            exactly under more-right. The slider fills whatever's left
+            between them. */}
+          {progress}
+        </motion.div>
       </aside>
     </TooltipProvider>
   );
