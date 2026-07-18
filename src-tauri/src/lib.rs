@@ -2013,17 +2013,11 @@ fn resolve_stream_ytdlp(app: tauri::AppHandle, video_id: String) -> Result<Strin
         return Err(format!("invalid videoId: {video_id}"));
     }
     let url = format!("https://www.youtube.com/watch?v={video_id}");
-    let mut command = std::process::Command::new(ytdlp::program(&ytdlp::managed_path(&app)));
-    command.args([
-        "-j",
-        "-f",
-        "bestaudio",
-        "--no-playlist",
-        "--no-warnings",
-        "--extractor-args",
-        "youtube:player_client=tv,android_vr",
-        &url,
-    ]);
+    let managed = ytdlp::managed_path(&app);
+    let mut command = std::process::Command::new(ytdlp::program(&managed));
+    command.args(["-j", "-f", "bestaudio", "--no-playlist", "--no-warnings"]);
+    command.args(ytdlp::youtube_runtime_args(&managed));
+    command.arg(&url);
     // Windows: a console-less GUI process spawning the console-subsystem
     // yt-dlp.exe with default flags makes Windows flash a console window
     // on every resolve. CREATE_NO_WINDOW suppresses it.
@@ -2051,6 +2045,10 @@ fn resolve_stream_ytdlp(app: tauri::AppHandle, video_id: String) -> Result<Strin
 struct DownloadState {
     complete: Arc<AtomicBool>,
     notify: Arc<Notify>,
+    /// Human-readable resolver failure captured from yt-dlp's stderr. The
+    /// frontend preflights the local URL and can surface this instead of the
+    /// browser's opaque "no supported source" message.
+    error: Arc<Mutex<Option<String>>>,
 }
 
 type DownloadMap = Arc<Mutex<HashMap<String, Arc<DownloadState>>>>;
@@ -2063,6 +2061,7 @@ type DownloadMap = Arc<Mutex<HashMap<String, Arc<DownloadState>>>>;
 // ios/mweb clients actually works better than authenticated streaming.
 #[derive(Clone)]
 struct StreamServer {
+    app: tauri::AppHandle,
     /// Persistent cache. Tracks land here for Premium-authenticated
     /// users and stay across app restarts.
     cache_dir: PathBuf,
@@ -2111,6 +2110,31 @@ fn requests_stream_refresh(req: &Request) -> bool {
         let val = it.next().unwrap_or("");
         key == "refresh" && (val == "1" || val == "true")
     })
+}
+
+fn stream_location_without_refresh(req: &Request) -> String {
+    // `Router::nest` rewrites Request::uri() before the inner handler runs.
+    // OriginalUri retains the unguessable stream-token prefix, which must stay
+    // in the redirect target or the refresh request falls through to a 404.
+    let uri = req
+        .extensions()
+        .get::<axum::extract::OriginalUri>()
+        .map(|original| &original.0)
+        .unwrap_or_else(|| req.uri());
+    let mut location = uri.path().to_string();
+    let retained = uri
+        .query()
+        .into_iter()
+        .flat_map(|query| query.split('&'))
+        .filter(|part| part.split('=').next() != Some("refresh"))
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("&");
+    if !retained.is_empty() {
+        location.push('?');
+        location.push_str(&retained);
+    }
+    location
 }
 
 /// Hash a URL into a stable hex filename. Uses Rust's stdlib
@@ -2315,6 +2339,30 @@ async fn get_stream_base_url(state: tauri::State<'_, StreamServerState>) -> Resu
 /// is immediately free and otherwise bails without spawning yt-dlp at all —
 /// prefetch is best-effort, and a skipped prefetch is resolved by the
 /// on-demand request that follows it.
+fn summarize_ytdlp_stderr(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let mut lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    // The actionable extractor/download error is conventionally last. Keep a
+    // little context without returning pages of warnings through localhost.
+    if lines.len() > 4 {
+        lines.drain(..lines.len() - 4);
+    }
+    let summary = lines.join(" | ");
+    if summary.is_empty() {
+        "yt-dlp produced no audio".into()
+    } else {
+        summary.chars().take(1200).collect()
+    }
+}
+
+/// Reject tiny HTML/storyboard/error payloads before they become persistent
+/// cache entries. A real YouTube audio track is comfortably larger than this.
+const MIN_AUDIO_BYTES: u64 = 32 * 1024;
+
 fn spawn_downloader(
     video_id: String,
     target_dir: PathBuf,
@@ -2346,18 +2394,41 @@ fn spawn_downloader(
             )
         };
 
+        // AppShell starts managed yt-dlp setup eagerly, but a fast first-run
+        // click can reach this task before the download finishes. Join the
+        // same serialized availability check here instead of spawning a
+        // missing PATH command and turning that race into MEDIA_ERR_SRC_NOT_SUPPORTED.
+        let ytdlp_program = match ytdlp::ensure_ytdlp_available(&srv.app).await {
+            Ok(program) => program,
+            Err(e) => {
+                let message = format!("yt-dlp unavailable: {e}");
+                eprintln!("[stream] {video_id}: {message}");
+                *state.error.lock().await = Some(message);
+                state.complete.store(true, Ordering::Release);
+                state.notify.notify_waiters();
+                downloads.lock().await.remove(&map_key);
+                return;
+            }
+        };
+        if let Err(e) = ytdlp::ensure_js_runtime(&srv.ytdlp_bin).await {
+            // Best-effort by contract: tv/android_vr can still resolve many
+            // tracks, so an unavailable GitHub/Deno download is not itself a
+            // playback failure. The selected client args below automatically
+            // omit web_safari when the managed runtime is absent.
+            eprintln!("[stream] {video_id}: Deno unavailable, using fallback clients: {e}");
+        }
+
         let url = format!("https://www.youtube.com/watch?v={video_id}");
         let part_path = target_dir.join(format!("{video_id}.part"));
         let final_path = target_dir.join(format!("{video_id}.webm"));
         let _ = tokio::fs::create_dir_all(&target_dir).await;
         let _ = tokio::fs::remove_file(&part_path).await; // clean stale
 
-        let mut cmd = TokioCommand::new(ytdlp::program(&srv.ytdlp_bin));
+        let mut cmd = TokioCommand::new(ytdlp_program);
         cmd.args([
             "-f",
             "bestaudio[ext=webm]/bestaudio",
             "--no-playlist",
-            "--no-warnings",
             "--no-part",
             "-q",
             // YouTube regularly hands out a signed media URL that then 403s
@@ -2377,20 +2448,21 @@ fn spawn_downloader(
             "1",
             "--socket-timeout",
             "15",
-            "--extractor-args",
-            "youtube:player_client=tv,android_vr",
             "-o",
             "-",
         ]);
+        cmd.args(ytdlp::youtube_runtime_args(&srv.ytdlp_bin));
         cmd.arg(&url);
         // Windows: suppress the console window for the child yt-dlp.exe
         // (see resolve_stream_ytdlp for rationale).
         #[cfg(windows)]
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        let mut child = match cmd.stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn() {
+        let mut child = match cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
             Ok(c) => c,
             Err(e) => {
+                let message = format!("could not start yt-dlp: {e}");
                 eprintln!("[stream] spawn {video_id}: {e}");
+                *state.error.lock().await = Some(message);
                 state.complete.store(true, Ordering::Release);
                 state.notify.notify_waiters();
                 downloads.lock().await.remove(&map_key);
@@ -2399,6 +2471,28 @@ fn spawn_downloader(
         };
 
         let mut stdout = child.stdout.take().unwrap();
+        // Drain stderr concurrently so verbose extractor warnings cannot fill
+        // the pipe and deadlock yt-dlp. Keep a bounded tail for diagnostics.
+        let stderr_task = child.stderr.take().map(|mut stderr| {
+            tokio::spawn(async move {
+                const STDERR_TAIL_BYTES: usize = 64 * 1024;
+                let mut tail = Vec::new();
+                let mut chunk = [0u8; 8192];
+                loop {
+                    match stderr.read(&mut chunk).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => {
+                            tail.extend_from_slice(&chunk[..read]);
+                            if tail.len() > STDERR_TAIL_BYTES {
+                                let excess = tail.len() - STDERR_TAIL_BYTES;
+                                tail.drain(..excess);
+                            }
+                        }
+                    }
+                }
+                tail
+            })
+        });
         let mut file = tokio::fs::File::create(&part_path).await.ok();
         let mut buf = vec![0u8; 64 * 1024];
         let mut ok = true;
@@ -2441,6 +2535,10 @@ fn spawn_downloader(
             drop(f);
         }
         let status = child.wait().await;
+        let stderr = match stderr_task {
+            Some(task) => task.await.unwrap_or_default(),
+            None => Vec::new(),
+        };
         let success = ok && status.map(|s| s.success()).unwrap_or(false);
 
         // Finish all file operations BEFORE signalling completion.
@@ -2453,29 +2551,39 @@ fn spawn_downloader(
         // SABR fallout). Renaming such a stub to .webm would pin a
         // permanently-broken cache entry that fails MEDIA_ERR_DECODE on
         // every replay — drop it instead so the next request retries.
-        const MIN_AUDIO_BYTES: u64 = 32 * 1024;
         let part_size = tokio::fs::metadata(&part_path)
             .await
             .map(|m| m.len())
             .unwrap_or(0);
         let supported_container =
             part_size >= MIN_AUDIO_BYTES && has_supported_audio_container(&part_path).await;
+        let mut ready = false;
         if success && supported_container {
             if let Err(e) = tokio::fs::rename(&part_path, &final_path).await {
                 eprintln!("[stream] rename: {e}");
+                *state.error.lock().await = Some(format!(
+                    "download finished but the audio cache file could not be installed: {e}"
+                ));
                 let _ = tokio::fs::remove_file(&part_path).await;
             } else {
+                ready = true;
                 eprintln!("[stream] cached {video_id} ({part_size} bytes)");
             }
         } else {
             if success && part_size < MIN_AUDIO_BYTES {
-                eprintln!(
-                    "[stream] download too small for {video_id}: {part_size} bytes (min {MIN_AUDIO_BYTES})"
+                let detail = format!(
+                    "yt-dlp returned only {part_size} bytes (minimum audio size is {MIN_AUDIO_BYTES})"
                 );
+                eprintln!("[stream] download too small for {video_id}: {detail}");
+                *state.error.lock().await = Some(detail);
             } else if success {
+                let detail = "yt-dlp returned an unsupported audio container".to_string();
                 eprintln!("[stream] unsupported audio payload for {video_id}; not caching");
+                *state.error.lock().await = Some(detail);
             } else {
-                eprintln!("[stream] download failed {video_id}");
+                let detail = summarize_ytdlp_stderr(&stderr);
+                eprintln!("[stream] download failed {video_id}: {detail}");
+                *state.error.lock().await = Some(detail);
             }
             let _ = tokio::fs::remove_file(&part_path).await;
         }
@@ -2483,7 +2591,7 @@ fn spawn_downloader(
         state.complete.store(true, Ordering::Release);
         state.notify.notify_waiters();
 
-        if success && supported_container {
+        if ready {
             // Evict from in-memory map after a grace period so a brief
             // re-play stays in RAM, then falls back to on-disk ServeFile.
             let downloads_evict = downloads.clone();
@@ -2509,14 +2617,26 @@ async fn sniff_audio_mime(path: &std::path::Path) -> &'static str {
     if let Ok(mut f) = tokio::fs::File::open(path).await {
         let _ = f.read(&mut buf).await;
     }
-    if &buf[4..8] == b"ftyp" {
-        "audio/mp4"
-    } else if &buf[..4] == &[0x1A, 0x45, 0xDF, 0xA3] {
-        "audio/webm"
-    } else if &buf[..3] == b"ID3" {
-        "audio/mpeg"
+    audio_mime_from_header(&buf).unwrap_or("application/octet-stream")
+}
+
+fn audio_mime_from_header(buf: &[u8]) -> Option<&'static str> {
+    if buf.len() >= 8 && &buf[4..8] == b"ftyp" {
+        Some("audio/mp4")
+    } else if buf.len() >= 4 && &buf[..4] == &[0x1A, 0x45, 0xDF, 0xA3] {
+        Some("audio/webm")
+    } else if buf.len() >= 4 && &buf[..4] == b"OggS" {
+        Some("audio/ogg")
+    } else if buf.len() >= 4 && &buf[..4] == b"fLaC" {
+        Some("audio/flac")
+    } else if buf.len() >= 12 && &buf[..4] == b"RIFF" && &buf[8..12] == b"WAVE" {
+        Some("audio/wav")
+    } else if (buf.len() >= 3 && &buf[..3] == b"ID3")
+        || (buf.len() >= 2 && buf[0] == 0xFF && (buf[1] & 0xE0) == 0xE0)
+    {
+        Some("audio/mpeg")
     } else {
-        "audio/webm"
+        None
     }
 }
 
@@ -2528,11 +2648,15 @@ async fn has_supported_audio_container(path: &std::path::Path) -> bool {
     let Ok(read) = file.read(&mut buf).await else {
         return false;
     };
-    read >= 8
-        && (&buf[4..8] == b"ftyp"
-            || &buf[..4] == &[0x1A, 0x45, 0xDF, 0xA3]
-            || &buf[..3] == b"ID3"
-            || (buf[0] == 0xFF && (buf[1] & 0xE0) == 0xE0))
+    audio_mime_from_header(&buf[..read]).is_some()
+}
+
+async fn is_valid_cached_audio(path: &std::path::Path) -> bool {
+    let size = tokio::fs::metadata(path)
+        .await
+        .map(|meta| meta.len())
+        .unwrap_or(0);
+    size >= MIN_AUDIO_BYTES && has_supported_audio_container(path).await
 }
 
 /// GET /stream/:video_id — unified serving path supporting Range
@@ -2568,12 +2692,21 @@ async fn stream_handler(
         let _ = tokio::fs::remove_file(target_dir.join(format!("{video_id}.part"))).await;
         // Strip the one-shot flag before Chromium makes later Range requests;
         // otherwise every seek using the same media URL would evict the file.
-        let location = req.uri().path().to_string();
+        let location = stream_location_without_refresh(&req);
         return (
             StatusCode::TEMPORARY_REDIRECT,
             [(axum::http::header::LOCATION, location)],
         )
             .into_response();
+    }
+
+    // Old versions could leave a truncated or mislabeled file in the
+    // persistent cache. Validate it before ServeFile sees it so known poison
+    // heals on the first request rather than costing a browser error + retry.
+    if final_path.exists() && !is_valid_cached_audio(&final_path).await {
+        eprintln!("[stream] dropping invalid cached payload for {video_id}");
+        let _ = tokio::fs::remove_file(&final_path).await;
+        srv.downloads.lock().await.remove(&map_key);
     }
 
     // If the full file isn't on disk yet, start (or attach to) the
@@ -2617,6 +2750,7 @@ async fn stream_handler(
                 let s = Arc::new(DownloadState {
                     complete: Arc::new(AtomicBool::new(false)),
                     notify: Arc::new(Notify::new()),
+                    error: Arc::new(Mutex::new(None)),
                 });
                 map.insert(map_key.clone(), s.clone());
                 drop(map);
@@ -2651,7 +2785,13 @@ async fn stream_handler(
                 "[stream] {video_id}: BAD_GATEWAY — complete but no .webm (elapsed {:.2}s)",
                 t0.elapsed().as_secs_f32()
             );
-            return (StatusCode::BAD_GATEWAY, "download failed").into_response();
+            let detail = state
+                .error
+                .lock()
+                .await
+                .clone()
+                .unwrap_or_else(|| "yt-dlp did not produce a playable audio file".into());
+            return (StatusCode::BAD_GATEWAY, detail).into_response();
         }
         eprintln!(
             "[stream] {video_id}: download finished in {:.2}s",
@@ -2772,6 +2912,7 @@ async fn prefetch_handler(
         let state = Arc::new(DownloadState {
             complete: Arc::new(AtomicBool::new(false)),
             notify: Arc::new(Notify::new()),
+            error: Arc::new(Mutex::new(None)),
         });
         map.insert(map_key.clone(), state.clone());
         state
@@ -2797,6 +2938,7 @@ fn generate_stream_token() -> String {
 }
 
 async fn start_stream_server(
+    app: tauri::AppHandle,
     port_state: Arc<Mutex<Option<u16>>>,
     token_state: Arc<Mutex<Option<String>>>,
     cache_dir: PathBuf,
@@ -2834,6 +2976,7 @@ async fn start_stream_server(
     }
 
     let server = StreamServer {
+        app,
         cache_dir,
         ephemeral_dir,
         cover_dir,
@@ -3126,8 +3269,16 @@ pub fn run() {
                 // email-based dedup before the UI reads the list.
                 dedup_accounts_by_identity(&handle).await;
                 cleanup_login_artifacts(&handle).await;
-                start_stream_server(port, token, cache_dir, ephemeral_dir, cover_dir, ytdlp_bin)
-                    .await;
+                start_stream_server(
+                    handle.clone(),
+                    port,
+                    token,
+                    cache_dir,
+                    ephemeral_dir,
+                    cover_dir,
+                    ytdlp_bin,
+                )
+                .await;
             });
             // Keep the active account's replayed cookie snapshot fresh.
             // Google leashes *extracted* cookies to ~2h; reloading the
@@ -3179,7 +3330,10 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::generate_stream_token;
+    use super::{
+        audio_mime_from_header, generate_stream_token, stream_location_without_refresh,
+        summarize_ytdlp_stderr,
+    };
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::routing::get;
@@ -3193,6 +3347,77 @@ mod tests {
         assert_eq!(a.len(), 32, "token should be 128 bits of hex");
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(a, b, "two tokens in a row must differ");
+    }
+
+    #[test]
+    fn refresh_redirect_keeps_non_refresh_query_flags() {
+        let request = Request::builder()
+            .uri("/stream/E7LVi1AA218?ephemeral=1&refresh=1")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            stream_location_without_refresh(&request),
+            "/stream/E7LVi1AA218?ephemeral=1"
+        );
+    }
+
+    #[test]
+    fn nested_refresh_redirect_keeps_stream_token_prefix() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let token = "deadbeefdeadbeefdeadbeefdeadbeef";
+            let inner = Router::new().route(
+                "/stream/:video_id",
+                get(|req: Request<Body>| async move {
+                    let location = stream_location_without_refresh(&req);
+                    (
+                        StatusCode::TEMPORARY_REDIRECT,
+                        [(axum::http::header::LOCATION, location)],
+                    )
+                }),
+            );
+            let app: Router = Router::new().nest(&format!("/{token}"), inner);
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/{token}/stream/E7LVi1AA218?ephemeral=1&refresh=1"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(axum::http::header::LOCATION)
+                    .and_then(|value| value.to_str().ok()),
+                Some("/deadbeefdeadbeefdeadbeefdeadbeef/stream/E7LVi1AA218?ephemeral=1")
+            );
+        });
+    }
+
+    #[test]
+    fn supported_audio_magic_maps_to_browser_mime_types() {
+        assert_eq!(
+            audio_mime_from_header(&[0, 0, 0, 0, b'f', b't', b'y', b'p']),
+            Some("audio/mp4")
+        );
+        assert_eq!(
+            audio_mime_from_header(&[0x1a, 0x45, 0xdf, 0xa3]),
+            Some("audio/webm")
+        );
+        assert_eq!(audio_mime_from_header(b"OggS"), Some("audio/ogg"));
+        assert_eq!(audio_mime_from_header(b"<html>blocked"), None);
+    }
+
+    #[test]
+    fn resolver_error_summary_keeps_actionable_tail() {
+        let stderr = b"warning one\nwarning two\nwarning three\nwarning four\nERROR: Sign in to confirm you're not a bot\n";
+        let summary = summarize_ytdlp_stderr(stderr);
+        assert!(summary.contains("ERROR: Sign in to confirm you're not a bot"));
+        assert!(!summary.contains("warning one"));
     }
 
     // Guards the security fix (review high #1): the stream server nests all

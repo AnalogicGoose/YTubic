@@ -1,5 +1,6 @@
 import type { Lyrics } from "@/lib/lyrics/types";
 import { parseLRC } from "@/lib/lyrics/parse-lrc";
+import { lyricsMetadataMatches } from "@/lib/lyrics/match";
 
 /**
  * LRCLIB (https://lrclib.net) — free, open lyrics database with synced
@@ -65,7 +66,8 @@ async function lrclibGet(p: LrclibParams): Promise<LrclibRecord | null> {
   const r = await fetch(url.toString());
   if (r.status === 404) return null;
   if (!r.ok) throw new Error(`LRCLIB /get ${r.status}`);
-  return (await r.json()) as LrclibRecord;
+  const record = (await r.json()) as LrclibRecord;
+  return recordMatches(p, record) ? record : null;
 }
 
 async function lrclibSearch(p: LrclibParams): Promise<LrclibRecord | null> {
@@ -81,14 +83,25 @@ async function lrclibSearch(p: LrclibParams): Promise<LrclibRecord | null> {
   // Prefer results with synced lyrics. Then, if we know the duration,
   // prefer the closest one — YTM and LRCLIB versions occasionally
   // differ by a second or two.
-  const synced = results.filter((r) => r.syncedLyrics);
-  const pool = synced.length > 0 ? synced : results;
+  const matching = results.filter((record) => recordMatches(p, record));
+  if (matching.length === 0) return null;
+  const synced = matching.filter((record) => record.syncedLyrics);
+  const pool = synced.length > 0 ? synced : matching;
   if (!p.duration) return pool[0];
   return pool.reduce((best, cur) => {
     const bestDiff = Math.abs((best.duration ?? 0) - (p.duration ?? 0));
     const curDiff = Math.abs((cur.duration ?? 0) - (p.duration ?? 0));
     return curDiff < bestDiff ? cur : best;
   });
+}
+
+function recordMatches(p: LrclibParams, record: LrclibRecord): boolean {
+  return lyricsMetadataMatches(
+    p.title,
+    p.artist,
+    record.trackName,
+    record.artistName,
+  );
 }
 
 function mapRecord(r: LrclibRecord): Lyrics | null {
@@ -106,4 +119,3 @@ function mapRecord(r: LrclibRecord): Lyrics | null {
   }
   return null;
 }
-

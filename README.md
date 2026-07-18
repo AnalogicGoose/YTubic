@@ -51,10 +51,14 @@ Download the latest package from the [Releases](https://github.com/AnalogicGoose
 - **Linux**: `.AppImage` (no install step, just `chmod +x` and run), `.deb`
   (Debian/Ubuntu), or `.rpm` (Fedora/openSUSE). Only the AppImage build
   auto-updates itself; the `.deb`/`.rpm` packages need a manual re-download.
-- On first launch the app downloads its own copy of yt-dlp (~12 MB) into its
-  data folder and keeps it updated automatically.
-- Signing in is optional: browse and playback work anonymously; sign in to get
-  your library, likes, and playlists.
+- On first launch the app downloads its own copy of yt-dlp (~18 MB) and the
+  official Deno runtime archive (~50 MB) into its data folder. Deno is needed
+  by current yt-dlp releases to solve YouTube's JavaScript challenges. Both
+  downloads come directly from their official GitHub Releases; yt-dlp checks
+  every 72 hours and Deno refreshes at most every 90 days.
+- Browsing and search work signed out. Playback, library access, likes, and
+  playlists require signing in with an active YouTube Music/YouTube Premium
+  account.
 
 ### FAQ
 
@@ -63,16 +67,18 @@ The installer is not code-signed (certificates are expensive for a free
 open-source project). Click "More info" → "Run anyway". The source code is
 public — you can audit it or build it yourself.
 
-**My antivirus flags the app / yt-dlp.**
+**My antivirus flags the app / yt-dlp / Deno.**
 yt-dlp is a widely-used open-source downloader that some AV vendors
 false-positive on. The binary is downloaded directly from yt-dlp's official
-GitHub releases.
+GitHub releases. Deno is an MIT-licensed JavaScript runtime downloaded from
+the official `denoland/deno` GitHub releases.
 
 **Will Google ban my account for using this?**
-Browsing/search/library requests look identical to the official web app, and
-audio streaming is fully anonymous (never tied to your account). There are no
-known cases of accounts being banned for third-party players — but no
-guarantees; see the disclaimer above.
+Browsing/search/library requests look identical to the official web app. The
+app checks the signed-in account's Premium status before playback, but never
+passes account cookies to yt-dlp; stream extraction itself stays anonymous.
+There are no known cases of accounts being banned for third-party players —
+but no guarantees; see the disclaimer above.
 
 **Playback suddenly stopped working.**
 YouTube periodically changes its streaming internals. yt-dlp usually ships a
@@ -146,6 +152,7 @@ src-tauri/               # Rust backend (axum stream proxy, cookies, tray)
 ## Credits
 
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) — audio streaming
+- [Deno](https://github.com/denoland/deno) — MIT-licensed YouTube challenge runtime
 - [LRCLIB](https://lrclib.net) — synced lyrics
 - Musixmatch and Genius — lyrics sources
 - [Tauri](https://tauri.app), [shadcn/ui](https://ui.shadcn.com),

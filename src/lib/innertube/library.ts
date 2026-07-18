@@ -1,10 +1,6 @@
 import type { ShelfItem } from "./types";
-import {
-  collectShelfNodes,
-  mapShelfWrapper,
-  rawBrowse,
-  type YtNode,
-} from "./shared";
+import { collectShelfNodes, mapShelfWrapper } from "./shared";
+import { fetchAllLibraryBrowseSections } from "./library-pagination";
 
 /**
  * Fetch the user's library landing page. Returns a list of "shelves"
@@ -20,16 +16,21 @@ export type LibrarySection = {
 };
 
 async function browseSections(browseId: string): Promise<LibrarySection[]> {
-  const json = await rawBrowse(browseId);
-  const tabs: YtNode[] =
-    json?.contents?.singleColumnBrowseResultsRenderer?.tabs ?? [];
-  const sections: YtNode[] =
-    tabs[0]?.tabRenderer?.content?.sectionListRenderer?.contents ?? [];
-
+  const sections = await fetchAllLibraryBrowseSections(browseId);
   const shelfNodes = collectShelfNodes(sections);
   const out: LibrarySection[] = [];
+  const seenItems = new Set<string>();
   shelfNodes.forEach((wrapper, i) => {
-    const { title, items } = mapShelfWrapper(wrapper, i);
+    const { title, items: mappedItems } = mapShelfWrapper(wrapper, i);
+    // Initial library responses can repeat cards across shelves such as
+    // "Recently added" and "Playlists". Keep the first occurrence while
+    // appending continuation pages in their server order.
+    const items = mappedItems.filter((item) => {
+      const key = `${item.kind}:${item.id}`;
+      if (seenItems.has(key)) return false;
+      seenItems.add(key);
+      return true;
+    });
     if (items.length === 0) return;
     out.push({ id: `${title}-${i}`, title, items });
   });
@@ -63,15 +64,12 @@ export async function fetchLikedSongs(): Promise<ShelfItem[]> {
  *
  * This is the "protected set" for cache management — the Storage tab
  * and the auto-clean sweep treat anything outside it as deletable, so
- * it must err toward completeness: any source failing to load throws
- * instead of returning a partial union that would silently mark whole
- * playlists as junk. (A playlist that loads but loses a continuation
- * page mid-walk is still truncated — `fetchPlaylist` tolerates that —
- * but the blast radius is a few re-downloadable cache files, not the
- * whole library.)
+ * it must err toward completeness: any source or nested playlist page
+ * failing to load throws instead of returning a partial union that would
+ * silently mark valid cached tracks as disposable.
  */
 export async function fetchLibraryTracks(): Promise<ShelfItem[]> {
-  const { fetchPlaylist } = await import("./playlist");
+  const { fetchPlaylistStrict } = await import("./playlist");
   const { fetchAlbum } = await import("./album");
 
   const [playlistSections, albumSections] = await Promise.all([
@@ -97,14 +95,14 @@ export async function fetchLibraryTracks(): Promise<ShelfItem[]> {
     }
   };
 
-  add(await fetchPlaylist("LM").then((p) => p.tracks));
+  add(await fetchPlaylistStrict("LM").then((p) => p.tracks));
 
   // Small worker pool: libraries can hold dozens of playlists/albums
   // and each costs at least one InnerTube round-trip. Four in flight
   // keeps total latency sane without hammering the endpoint.
   const jobs: (() => Promise<ShelfItem[]>)[] = [
     ...playlistIds.map(
-      (id) => () => fetchPlaylist(id).then((p) => p.tracks),
+      (id) => () => fetchPlaylistStrict(id).then((p) => p.tracks),
     ),
     ...albumIds.map((id) => () => fetchAlbum(id).then((a) => a.tracks)),
   ];

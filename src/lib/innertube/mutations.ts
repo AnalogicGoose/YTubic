@@ -1,4 +1,5 @@
-import { innertubePost, rawBrowse, type YtNode } from "./shared";
+import { innertubePost, collectShelfNodes, type YtNode } from "./shared";
+import { fetchAllLibraryBrowseSections } from "./library-pagination";
 
 /**
  * Mutating InnerTube actions (likes + playlist edits). All require the
@@ -57,23 +58,19 @@ export type UserPlaylist = {
  * editable via `browse/edit_playlist`.
  */
 export async function fetchUserPlaylists(): Promise<UserPlaylist[]> {
-  const json = await rawBrowse("FEmusic_liked_playlists");
-  const tabs: YtNode[] =
-    json?.contents?.singleColumnBrowseResultsRenderer?.tabs ?? [];
-  const sections: YtNode[] =
-    tabs[0]?.tabRenderer?.content?.sectionListRenderer?.contents ?? [];
-
+  const sections = await fetchAllLibraryBrowseSections(
+    "FEmusic_liked_playlists",
+  );
   const out: UserPlaylist[] = [];
-  for (const section of sections) {
+  for (const section of collectShelfNodes(sections)) {
     const shelf =
-      section?.gridRenderer ??
       section?.musicShelfRenderer ??
-      section?.musicCarouselShelfRenderer;
+      section?.musicCarouselShelfRenderer ??
+      section?.musicCardShelfRenderer;
     const items: YtNode[] = shelf?.items ?? shelf?.contents ?? [];
     for (const raw of items) {
       const r =
-        raw?.musicTwoRowItemRenderer ??
-        raw?.musicResponsiveListItemRenderer;
+        raw?.musicTwoRowItemRenderer ?? raw?.musicResponsiveListItemRenderer;
       if (!r) continue;
       const browseId: string | undefined =
         r.navigationEndpoint?.browseEndpoint?.browseId ??
@@ -89,7 +86,9 @@ export async function fetchUserPlaylists(): Promise<UserPlaylist[]> {
       const title =
         readRun(r.title) ||
         r.accessibilityText ||
-        readRun(r.flexColumns?.[0]?.musicResponsiveListItemFlexColumnRenderer?.text) ||
+        readRun(
+          r.flexColumns?.[0]?.musicResponsiveListItemFlexColumnRenderer?.text,
+        ) ||
         "";
       if (!title) continue;
 
@@ -145,6 +144,39 @@ export async function addToPlaylist(
   // edit_playlist returns HTTP 200 even when it rejects the edit (not the
   // owner, stale cookies, …) — surface the envelope status so the
   // optimistic "Added to <playlist>" toast doesn't lie.
+  const status = json?.status as string | undefined;
+  if (status && status !== "STATUS_SUCCEEDED") {
+    throw new Error(`edit_playlist failed: ${status}`);
+  }
+}
+
+/**
+ * Remove one exact occurrence of a video from a playlist. `setVideoId` is an
+ * opaque per-entry identifier supplied by playlist browse responses; using a
+ * bare video ID would be ambiguous when a playlist contains duplicates.
+ */
+export async function removeFromPlaylist(
+  playlistId: string,
+  videoId: string,
+  setVideoId: string,
+): Promise<void> {
+  const rawPlaylistId = playlistId.startsWith("VL")
+    ? playlistId.slice(2)
+    : playlistId;
+  if (!rawPlaylistId || !videoId || !setVideoId) {
+    throw new Error("Cannot remove playlist entry without exact identifiers");
+  }
+
+  const json = await innertubePost("browse/edit_playlist", {
+    playlistId: rawPlaylistId,
+    actions: [
+      {
+        action: "ACTION_REMOVE_VIDEO",
+        removedVideoId: videoId,
+        setVideoId,
+      },
+    ],
+  });
   const status = json?.status as string | undefined;
   if (status && status !== "STATUS_SUCCEEDED") {
     throw new Error(`edit_playlist failed: ${status}`);

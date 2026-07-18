@@ -77,6 +77,10 @@ discord-rich-presence = "0.2"
 # MD5 for Last.fm request signing (api_sig = md5 of sorted params + secret).
 # Tiny, single-purpose crate. See src/lastfm.rs.
 md5 = "0.7"
+# The official Deno runtime is distributed as a small ZIP archive. Goosic
+# manages it beside yt-dlp so current YouTube JavaScript challenges can be
+# solved on end-user machines that do not already have a JS runtime installed.
+zip = { version = "4.6", default-features = false, features = ["deflate-flate2"] }
 
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38"

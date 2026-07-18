@@ -3,14 +3,15 @@ import { isPremium } from "@/lib/store/premium";
 import type { QueueTrack } from "@/lib/store/playback";
 
 /**
- * The Rust side runs a tiny axum server on a random localhost port that
- * streams yt-dlp output progressively. We query the port once and build
- * stream URLs from it.
+ * The Rust side runs a tiny axum server on a random localhost port. It
+ * downloads and validates yt-dlp output, then Range-serves the completed
+ * audio file. We query the port once and build stream URLs from it.
  *
  * Non-Premium / signed-out users append `?ephemeral=1` to every stream
- * URL. The Rust handler reads that as "serve playback but write to a
- * session-only cache directory that gets wiped on every app startup" —
- * a persistent on-disk library of tracks is a Premium-only feature.
+ * URL. The Rust handler reads that as "write to a session-only cache directory
+ * that gets wiped on every app startup." The audio engine currently gates
+ * playback before this point; retaining the flag keeps the storage boundary
+ * safe for diagnostic or future callers.
  */
 
 let baseUrlPromise: Promise<string> | null = null;
@@ -39,6 +40,45 @@ export function getStreamBaseUrl(): Promise<string> {
   return baseUrlPromise;
 }
 
+export class StreamPreparationError extends Error {
+  constructor(
+    message: string,
+    readonly status?: number,
+  ) {
+    super(message);
+    this.name = "StreamPreparationError";
+  }
+}
+
+async function prepareLocalStream(url: string): Promise<void> {
+  let response: Response;
+  try {
+    // A one-byte Range request makes the Rust side finish/validate the file
+    // before HTMLAudio sees it. HTTP failures can then retain yt-dlp's useful
+    // diagnostic instead of collapsing into MEDIA_ERR_SRC_NOT_SUPPORTED.
+    response = await fetch(url, {
+      headers: { Range: "bytes=0-0" },
+      cache: "no-store",
+    });
+  } catch (error) {
+    throw new StreamPreparationError(
+      `Audio stream server unavailable: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+  if (!response.ok) {
+    const detail = (await response.text().catch(() => "")).trim();
+    throw new StreamPreparationError(
+      `Audio resolver failed (HTTP ${response.status})${
+        detail ? `: ${detail.slice(0, 600)}` : ""
+      }`,
+      response.status,
+    );
+  }
+  await response.body?.cancel().catch(() => {});
+}
+
 export async function streamUrlFor(
   videoId: string,
   options?: { refresh?: boolean },
@@ -46,9 +86,16 @@ export async function streamUrlFor(
   const base = await getStreamBaseUrl();
   const params = new URLSearchParams();
   if (!isPremium()) params.set("ephemeral", "1");
+  const canonicalQuery = params.size ? `?${params}` : "";
+  const canonical = `${base}/stream/${encodeURIComponent(videoId)}${canonicalQuery}`;
   if (options?.refresh) params.set("refresh", "1");
-  const query = params.size ? `?${params}` : "";
-  return `${base}/stream/${encodeURIComponent(videoId)}${query}`;
+  const prepareQuery = params.size ? `?${params}` : "";
+  await prepareLocalStream(
+    `${base}/stream/${encodeURIComponent(videoId)}${prepareQuery}`,
+  );
+  // A refresh is one-shot. Return the canonical URL so HTMLAudio's later
+  // Range requests cannot evict the file that the preflight just repaired.
+  return canonical;
 }
 
 const prefetched = new Set<string>();

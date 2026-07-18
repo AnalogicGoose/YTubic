@@ -33,10 +33,67 @@ export function useAudioEngine() {
   // track that keeps failing falls through to the normal error/skip path
   // instead of looping. Cleared on a successful `playing`.
   const retriedTrackRef = useRef<string | null>(null);
+  // MediaError and play() rejection usually report the same failed load. Track
+  // a generation so only the first signal drives retry/skip state.
+  const loadGenerationRef = useRef(0);
+  const activeMediaGenerationRef = useRef(-1);
+  const handledFailureGenerationRef = useRef(-1);
+  const retryTimerRef = useRef<number | null>(null);
+  const handlePlaybackFailureRef = useRef<
+    (message: string, generation?: number) => void
+  >(() => {});
   // Bumping this re-runs the resolve effect for the *current* track
   // without any of its real deps changing — used to re-fetch a fresh
   // stream URL after a transient failure (e.g. a googlevideo 403).
   const [retryNonce, setRetryNonce] = useState(0);
+
+  handlePlaybackFailureRef.current = (message, generation) => {
+    const currentGeneration = generation ?? loadGenerationRef.current;
+    if (currentGeneration !== loadGenerationRef.current) return;
+    if (handledFailureGenerationRef.current === currentGeneration) return;
+    handledFailureGenerationRef.current = currentGeneration;
+
+    const store = usePlaybackStore.getState();
+    const current = store.index >= 0 ? store.queue[store.index] : undefined;
+    const key = current ? `${current.videoId}:${store.index}` : null;
+    if (store.playing && key && retriedTrackRef.current !== key) {
+      retriedTrackRef.current = key;
+      store.setStatus("loading");
+      if (retryTimerRef.current !== null) {
+        window.clearTimeout(retryTimerRef.current);
+      }
+      retryTimerRef.current = window.setTimeout(() => {
+        retryTimerRef.current = null;
+        const latest = usePlaybackStore.getState();
+        const latestTrack =
+          latest.index >= 0 ? latest.queue[latest.index] : undefined;
+        const latestKey = latestTrack
+          ? `${latestTrack.videoId}:${latest.index}`
+          : null;
+        // A delayed retry must never tear down a new track selected while the
+        // old source was failing.
+        if (latest.playing && latestKey === key) {
+          setRetryNonce((nonce) => nonce + 1);
+        }
+      }, 400);
+      return;
+    }
+
+    store.setStatus("error", message);
+    consecutiveErrorsRef.current += 1;
+    const hasNext = store.index >= 0 && store.index + 1 < store.queue.length;
+    if (store.playing && hasNext && consecutiveErrorsRef.current <= 3) {
+      store.next();
+      return;
+    }
+    if (consecutiveErrorsRef.current > 3) {
+      store.setStatus(
+        "error",
+        "YouTube is limiting this connection, so playback was paused. Try again later or use another network/VPN.",
+      );
+    }
+    store.setPlaying(false);
+  };
 
   // Ensure a single <audio> element exists.
   useEffect(() => {
@@ -47,6 +104,10 @@ export function useAudioEngine() {
     // headers, and setting it makes the media fail to load in the webview.
     audioRef.current = el;
     return () => {
+      if (retryTimerRef.current !== null) {
+        window.clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
       el.pause();
       el.src = "";
       audioRef.current = null;
@@ -96,6 +157,9 @@ export function useAudioEngine() {
       }
     };
     const onEnded = () => {
+      if (activeMediaGenerationRef.current !== loadGenerationRef.current) {
+        return;
+      }
       store().next();
     };
     const onError = () => {
@@ -115,55 +179,15 @@ export function useAudioEngine() {
         console.error("[audio] element error:", msg, "src=", el.currentSrc);
       }
 
-      // One automatic retry of the SAME track before giving up. Most
-      // first-play failures are a transient googlevideo 403 on the media
-      // URL: the stream server drops the failed entry immediately, so a
-      // re-fetch spawns a fresh yt-dlp resolve that usually succeeds —
-      // exactly what a manual re-click does. Only retry a track the user
-      // actively wants playing, and only once per track instance.
-      {
-        const s0 = store();
-        const cur0 = s0.index >= 0 ? s0.queue[s0.index] : undefined;
-        const key0 = cur0 ? `${cur0.videoId}:${s0.index}` : null;
-        if (s0.playing && key0 && retriedTrackRef.current !== key0) {
-          retriedTrackRef.current = key0;
-          if (import.meta.env.DEV) {
-            console.warn("[audio] retrying", key0, "after error:", msg);
-          }
-          store().setStatus("loading");
-          // Small delay so a truly-dead source doesn't hot-loop; also
-          // gives the server a beat to tear down the failed download.
-          window.setTimeout(() => setRetryNonce((n) => n + 1), 400);
-          return;
-        }
-      }
-
-      store().setStatus("error", msg);
-
-      // Auto-advance: if the user wanted playback and we have a next
-      // track, try it. Stop after 3 consecutive failures so a dead
-      // network or a poisoned playlist doesn't burn through everything.
-      const s = store();
-      const hasNext = s.index >= 0 && s.index + 1 < s.queue.length;
-      consecutiveErrorsRef.current += 1;
-      if (s.playing && hasNext && consecutiveErrorsRef.current <= 3) {
-        // Keep `playing: true` so the new track auto-resumes.
-        s.next();
-      } else {
-        // 3 tracks in a row failing to load (while cached ones keep playing
-        // fine) is the signature of YouTube throttling this connection,
-        // rather than any one track being broken — say so instead of
-        // leaving the raw MEDIA_ERR_* code on screen.
-        if (consecutiveErrorsRef.current > 3) {
-          store().setStatus(
-            "error",
-            "YouTube está limitando tu conexión — la reproducción se pausó. Prueba en un rato o con otra red/VPN.",
-          );
-        }
-        s.setPlaying(false);
+      const generation = activeMediaGenerationRef.current;
+      if (generation >= 0) {
+        handlePlaybackFailureRef.current(msg, generation);
       }
     };
     const onPlaying = () => {
+      if (activeMediaGenerationRef.current !== loadGenerationRef.current) {
+        return;
+      }
       consecutiveErrorsRef.current = 0;
       // Track played successfully — allow a fresh auto-retry if it later
       // fails again (e.g. a mid-stream drop on a much later replay).
@@ -223,6 +247,14 @@ export function useAudioEngine() {
   useEffect(() => {
     const el = audioRef.current;
     if (!el) return;
+    const token = ++resolveTokenRef.current;
+    const generation = ++loadGenerationRef.current;
+    activeMediaGenerationRef.current = -1;
+    handledFailureGenerationRef.current = -1;
+    if (retryTimerRef.current !== null) {
+      window.clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
     // Stop the previous track immediately. Without this the old src keeps
     // playing through the streamUrlFor() round-trip (~50–500 ms), so the
     // user hears the tail of track A bleed into the start of track B.
@@ -258,7 +290,6 @@ export function useAudioEngine() {
     // for the duration of the streamUrlFor() round-trip.
     el.removeAttribute("src");
 
-    const token = ++resolveTokenRef.current;
     usePlaybackStore.getState().setStatus("loading");
 
     // Persist this track's title/artist beside its cache file so the
@@ -273,10 +304,10 @@ export function useAudioEngine() {
       );
     }
 
-    // Playback goes through our local streaming HTTP server. It spawns
-    // yt-dlp and pipes the audio bytes progressively so playback starts
-    // as soon as the first chunk lands (typically ~200ms after the
-    // yt-dlp subprocess starts emitting bytes).
+    // Playback goes through our local streaming HTTP server. The preflight
+    // waits for yt-dlp to finish and validates one byte through the same Range
+    // path HTMLAudio will use, so resolver failures stay diagnosable and
+    // MP4/M4A files have their final metadata before Chromium decodes them.
     const retryKey = videoId ? `${videoId}:${index}` : null;
     streamUrlFor(streamVideoId, {
       refresh: retryKey !== null && retriedTrackRef.current === retryKey,
@@ -286,6 +317,7 @@ export function useAudioEngine() {
         if (import.meta.env.DEV) {
           console.debug("[audio] setting src for", videoId, "→", src);
         }
+        activeMediaGenerationRef.current = generation;
         el.src = src;
         usePlaybackStore.getState().setStreamUrl(src);
         el.load();
@@ -299,16 +331,16 @@ export function useAudioEngine() {
             if (import.meta.env.DEV) {
               console.error("[audio] play() rejected:", e);
             }
-            usePlaybackStore
-              .getState()
-              .setStatus("error", e?.message ?? String(e));
+            handlePlaybackFailureRef.current(
+              e?.message ?? String(e),
+              generation,
+            );
           });
         }
       })
       .catch((e: Error) => {
         if (token !== resolveTokenRef.current) return;
-        usePlaybackStore.getState().setStatus("error", e.message);
-        usePlaybackStore.getState().setPlaying(false);
+        handlePlaybackFailureRef.current(e.message, generation);
       });
     // `index` is in the deps so advancing to a different queue slot that
     // holds the *same* videoId (a duplicate in a playlist, radio dupes)
@@ -337,9 +369,10 @@ export function useAudioEngine() {
     }
     if (!el.src) return;
     if (playing) {
+      const generation = activeMediaGenerationRef.current;
       void el.play().catch((e) => {
         if (e?.name === "AbortError") return;
-        usePlaybackStore.getState().setStatus("error", e?.message ?? String(e));
+        handlePlaybackFailureRef.current(e?.message ?? String(e), generation);
       });
     } else {
       el.pause();
@@ -378,9 +411,10 @@ export function useAudioEngine() {
     // the element is paused, so seeking to 0 alone leaves it silent. Resume
     // here when the store wants playback but the element is paused.
     if (usePlaybackStore.getState().playing && el.paused && el.src) {
+      const generation = activeMediaGenerationRef.current;
       void el.play().catch((e) => {
         if (e?.name === "AbortError") return;
-        usePlaybackStore.getState().setStatus("error", e?.message ?? String(e));
+        handlePlaybackFailureRef.current(e?.message ?? String(e), generation);
       });
     }
   }, [pendingSeek]);

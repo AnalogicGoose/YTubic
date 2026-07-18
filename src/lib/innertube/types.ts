@@ -32,6 +32,12 @@ export type ShelfItem = {
   playCount?: string;
   /** Pre-formatted "added to playlist" date. User-owned editable playlists. */
   dateAdded?: string;
+  /**
+   * Opaque ID for this exact occurrence of a video in an editable playlist.
+   * Unlike `id` (the video ID), this remains unique when the same song was
+   * added more than once and is required by InnerTube for removal/reordering.
+   */
+  playlistSetVideoId?: string;
   /** Round (true for artists) */
   round?: boolean;
   /**

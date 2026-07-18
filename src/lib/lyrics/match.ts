@@ -49,3 +49,24 @@ export function hitMatches(
     tokenOverlap(reqArtist, hitArtist) >= 0.5
   );
 }
+
+/**
+ * Provider-facing metadata guard. Unlike the lower-level fuzzy matcher,
+ * this accepts raw strings and requires the candidate to carry artist
+ * metadata whenever the request does. Lyrics APIs sometimes return a
+ * highly-ranked song with the same generic title but a different artist.
+ */
+export function lyricsMetadataMatches(
+  requestedTitle: string,
+  requestedArtist: string | undefined,
+  candidateTitle: string | undefined,
+  candidateArtist: string | undefined,
+): boolean {
+  const reqTitle = normalizeForMatch(requestedTitle);
+  const reqArtist = normalizeForMatch(requestedArtist ?? "");
+  const hitTitle = normalizeForMatch(candidateTitle ?? "");
+  const hitArtist = normalizeForMatch(candidateArtist ?? "");
+  if (!hitTitle) return false;
+  if (reqArtist && !hitArtist) return false;
+  return hitMatches(reqTitle, reqArtist, hitTitle, hitArtist);
+}

@@ -240,7 +240,10 @@ function PlaylistPageView() {
           No tracks match “{searchQuery.trim()}”.
         </div>
       ) : (
-        <TrackList tracks={visibleTracks} />
+        <TrackList
+          tracks={visibleTracks}
+          playlistId={isLikedSongs ? undefined : id}
+        />
       )}
 
       {query.hasNextPage && (

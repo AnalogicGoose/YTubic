@@ -6,10 +6,15 @@ import {
   type ReactNode,
 } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useQuery,
+  useQueryClient,
+  type InfiniteData,
+} from "@tanstack/react-query";
 import {
   ListPlusIcon,
   ListEndIcon,
+  ListXIcon,
   RadioIcon,
   UserIcon,
   DiscAlbumIcon,
@@ -62,14 +67,24 @@ import {
   dislikeTrack,
   fetchUserPlaylists,
   likeTrack,
+  removeFromPlaylist,
   removeRating,
   type UserPlaylist,
 } from "@/lib/innertube/mutations";
+import {
+  removePlaylistEntryFromPages,
+  type PlaylistPageChunk,
+} from "@/lib/innertube/playlist-cache";
 import { usePlaybackStore } from "@/lib/store/playback";
 import type { ShelfItem } from "@/lib/innertube/types";
 import { syncLastfmLove } from "@/lib/lastfm";
 
-type TrackContext = { tracks: ShelfItem[]; index: number };
+type TrackContext = {
+  tracks: ShelfItem[];
+  index: number;
+  /** Current playlist query key. Present only on rows rendered by that route. */
+  playlistId?: string;
+};
 
 type Primitives = {
   Item: ComponentType<any>;
@@ -181,6 +196,36 @@ export function useTrackMenuController(item: ShelfItem) {
       toast.error(`Add failed: ${String(e)}`);
     }
   };
+  const runRemoveFromPlaylist = async (
+    playlistId: string,
+    playlistSetVideoId: string,
+  ) => {
+    try {
+      await removeFromPlaylist(playlistId, item.id, playlistSetVideoId);
+      const queryKey = ["playlist-pages", playlistId] as const;
+      qc.setQueryData<InfiniteData<PlaylistPageChunk, unknown>>(
+        queryKey,
+        (old) =>
+          old
+            ? {
+                ...old,
+                pages: removePlaylistEntryFromPages(
+                  old.pages,
+                  playlistSetVideoId,
+                ),
+              }
+            : old,
+      );
+      await Promise.all([
+        qc.invalidateQueries({ queryKey, exact: true }),
+        qc.invalidateQueries({ queryKey: ["user-playlists"] }),
+        qc.invalidateQueries({ queryKey: ["library", "playlists"] }),
+      ]);
+      toast.success("Removed from playlist");
+    } catch (e) {
+      toast.error(`Remove failed: ${String(e)}`);
+    }
+  };
 
   const primeUserPlaylists = () => {
     if (!playlists.data && !playlists.isFetching && !playlists.isError) {
@@ -199,6 +244,7 @@ export function useTrackMenuController(item: ShelfItem) {
     runRemoveRating,
     runDislike,
     runAddToPlaylist,
+    runRemoveFromPlaylist,
     primeUserPlaylists,
     newPlaylistOpen,
     setNewPlaylistOpen,
@@ -233,12 +279,20 @@ export function TrackMenuItems({
     runRemoveRating,
     runDislike,
     runAddToPlaylist,
+    runRemoveFromPlaylist,
     primeUserPlaylists,
     setNewPlaylistOpen,
   } = controller;
 
   const artist = item.artists?.find((a) => !!a.id);
   const albumBrowseId = undefined;
+  const removablePlaylistEntry =
+    context?.playlistId && item.playlistSetVideoId
+      ? {
+          playlistId: context.playlistId,
+          playlistSetVideoId: item.playlistSetVideoId,
+        }
+      : undefined;
 
   return (
     <>
@@ -328,6 +382,24 @@ export function TrackMenuItems({
           </Item>
         </SubContent>
       </Sub>
+
+      {removablePlaylistEntry ? (
+        <>
+          <Separator />
+          <Item
+            variant="destructive"
+            onSelect={() =>
+              runRemoveFromPlaylist(
+                removablePlaylistEntry.playlistId,
+                removablePlaylistEntry.playlistSetVideoId,
+              )
+            }
+          >
+            <ListXIcon />
+            Remove from playlist
+          </Item>
+        </>
+      ) : null}
 
       {(artist || albumBrowseId) && <Separator />}
 

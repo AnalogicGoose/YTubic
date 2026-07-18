@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 
 type YtdlpState = {
-  phase: "downloading" | "ready" | "error";
+  phase: "downloading" | "runtime" | "ready" | "error";
   message?: string | null;
 };
 
@@ -36,6 +36,14 @@ export function useYtdlpSetup(): void {
         toast.loading("Setting up the audio engine (downloading yt-dlp)…", {
           id: TOAST_ID,
           duration: Infinity,
+        });
+      } else if (phase === "runtime") {
+        sawDownloadRef.current = true;
+        toast.loading("Setting up YouTube playback (downloading Deno)...", {
+          id: TOAST_ID,
+          duration: Infinity,
+          description:
+            "One-time download for current YouTube signature challenges.",
         });
       } else if (phase === "ready") {
         if (sawDownloadRef.current) {

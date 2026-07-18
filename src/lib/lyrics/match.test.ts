@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { hitMatches, normalizeForMatch, tokenOverlap } from "@/lib/lyrics/match";
+import {
+  hitMatches,
+  lyricsMetadataMatches,
+  normalizeForMatch,
+  tokenOverlap,
+} from "@/lib/lyrics/match";
 
 describe("normalizeForMatch", () => {
   it("lowercases, strips punctuation and collapses whitespace", () => {
@@ -51,6 +56,31 @@ describe("hitMatches", () => {
   it("tolerates featurings / parentheticals via normalization", () => {
     expect(
       hitMatches(norm("Blinding Lights"), norm("The Weeknd"), norm("Blinding Lights (Remix)"), norm("The Weeknd feat. X")),
+    ).toBe(true);
+  });
+});
+
+describe("lyricsMetadataMatches", () => {
+  it("rejects the same title from another artist", () => {
+    expect(
+      lyricsMetadataMatches("Real Me", "Future", "Real Me", "Lil Baby"),
+    ).toBe(false);
+  });
+
+  it("rejects missing candidate artist metadata when the request has an artist", () => {
+    expect(lyricsMetadataMatches("Hello", "Adele", "Hello", undefined)).toBe(
+      false,
+    );
+  });
+
+  it("allows punctuation and featured-artist differences", () => {
+    expect(
+      lyricsMetadataMatches(
+        "Blinding Lights (Remix)",
+        "The Weeknd feat. Rosalia",
+        "Blinding Lights - Remix",
+        "The Weeknd, Rosalia",
+      ),
     ).toBe(true);
   });
 });

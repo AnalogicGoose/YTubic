@@ -1,6 +1,7 @@
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import type { Lyrics } from "@/lib/lyrics/types";
 import { parseLRC } from "@/lib/lyrics/parse-lrc";
+import { lyricsMetadataMatches } from "@/lib/lyrics/match";
 
 /**
  * Musixmatch — unofficial reverse-engineered web-desktop client. The
@@ -207,10 +208,17 @@ async function findTrackId(
     if (!r.ok) return null;
     const json = (await r.json()) as MxmEnvelope<MxmSearchBody>;
     if (json?.message?.header?.status_code === 401) return "auth-failure";
-    const list = json?.message?.body?.track_list ?? [];
+    const list = (json?.message?.body?.track_list ?? []).filter(({ track }) =>
+      lyricsMetadataMatches(
+        p.title,
+        p.artist,
+        track?.track_name,
+        track?.artist_name,
+      ),
+    );
     // Prefer a track with synced subtitles; fall back to any track with
     // lyrics. The result list is already sorted by rating descending, so
-    // the first hit in either pool is the best one.
+    // the first metadata-matching hit in either pool is the best one.
     const synced = list.find((t) => t.track?.has_subtitles === 1);
     if (synced?.track?.track_id) return synced.track.track_id;
     const plain = list.find((t) => t.track?.has_lyrics === 1);

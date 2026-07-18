@@ -23,6 +23,11 @@ type Props = {
    *  where YT doesn't ship duration in the shelf payload but does
    *  ship a play count. */
   showPlays?: boolean;
+  /**
+   * ID of the playlist that owns these exact rows. Combined with each row's
+   * `playlistSetVideoId`, this enables the safe remove action in its menus.
+   */
+  playlistId?: string;
   className?: string;
 };
 
@@ -88,6 +93,7 @@ export function TrackList({
   hideThumbnails = false,
   hideAlbum = false,
   showPlays = false,
+  playlistId,
   className,
 }: Props) {
   const active = usePlaybackStore(currentTrack);
@@ -135,7 +141,7 @@ export function TrackList({
     estimateSize: () => ROW_SIZE,
     overscan: 8,
     scrollMargin,
-    getItemKey: (i) => `${tracks[i].id}:${i}`,
+    getItemKey: (i) => tracks[i].playlistSetVideoId ?? `${tracks[i].id}:${i}`,
   });
 
   const showAlbum = !hideAlbum && tracks.some((t) => t.album);
@@ -225,6 +231,7 @@ export function TrackList({
                 hideThumbnails={hideThumbnails}
                 showAlbum={showAlbum}
                 showPlays={showPlays}
+                playlistId={playlistId}
                 isActive={active?.videoId === t.id}
                 playing={playing}
                 videoSourceSelected={sourcePrefs[t.id]?.selected === "video"}
@@ -245,6 +252,7 @@ type RowProps = {
   hideThumbnails: boolean;
   showAlbum: boolean;
   showPlays: boolean;
+  playlistId?: string;
   isActive: boolean;
   playing: boolean;
   videoSourceSelected: boolean;
@@ -258,6 +266,7 @@ function TrackRow({
   hideThumbnails,
   showAlbum,
   showPlays,
+  playlistId,
   isActive,
   playing,
   videoSourceSelected,
@@ -403,13 +412,13 @@ function TrackRow({
 
       <div className="flex shrink-0 items-center justify-end">
         <LikeDislikeButtons videoId={t.id} track={t} compact hideUnlessLiked />
-        <TrackMoreMenu item={t} context={{ tracks, index: idx }} />
+        <TrackMoreMenu item={t} context={{ tracks, index: idx, playlistId }} />
       </div>
     </li>
   );
 
   return (
-    <TrackContextMenu item={t} context={{ tracks, index: idx }}>
+    <TrackContextMenu item={t} context={{ tracks, index: idx, playlistId }}>
       {row}
     </TrackContextMenu>
   );

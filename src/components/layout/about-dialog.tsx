@@ -22,6 +22,11 @@ const CREDITS: { name: string; role: string; url: string }[] = [
     role: "audio streaming",
     url: "https://github.com/yt-dlp/yt-dlp",
   },
+  {
+    name: "Deno",
+    role: "YouTube challenge runtime (MIT)",
+    url: "https://github.com/denoland/deno",
+  },
   { name: "LRCLIB", role: "synced lyrics", url: "https://lrclib.net" },
   { name: "Musixmatch", role: "lyrics", url: "https://www.musixmatch.com" },
   { name: "Genius", role: "lyrics", url: "https://genius.com" },

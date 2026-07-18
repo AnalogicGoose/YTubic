@@ -3,7 +3,7 @@
 > **Read this file first in every new Codex session.** It is the durable product,
 > engineering, UI, release, and troubleshooting context for this repository.
 >
-> Last verified: **2026-07-16**
+> Last verified: **2026-07-17**
 > Current app version: **0.4.6**
 > Current `main`: **v0.4.6 glass/theme and memory refinements**
 > Latest public release: <https://github.com/AnalogicGoose/Goosic/releases/tag/v0.4.6>
@@ -87,7 +87,8 @@ Current major capabilities:
 - Multiple YouTube account/channel support.
 - Google/YouTube sign-in on Windows WebView2 and macOS WKWebView, with
   platform-native browser identities and persistent per-account profiles.
-- Local stream proxy and managed yt-dlp.
+- Local stream proxy, managed yt-dlp, and managed Deno challenge runtime.
+- Premium-gated playback; account cookies are never passed to yt-dlp.
 - Windows SMTC/media keys, tray, autostart, notifications, and single instance.
 - Last.fm scrobbling and optional love synchronization.
 - Discord Rich Presence.
@@ -109,7 +110,7 @@ Current major capabilities:
 | Client state     | Zustand, often persisted to localStorage               |
 | Motion           | Motion for React                                       |
 | Music data       | YouTube InnerTube via `youtubei.js` and custom parsers |
-| Audio URLs       | Managed yt-dlp + local Rust proxy                      |
+| Audio URLs       | Managed yt-dlp + Deno + local Rust proxy               |
 | Unit tests       | Vitest                                                 |
 | Package manager  | pnpm 10.33.1                                           |
 
@@ -130,7 +131,7 @@ React + TanStack Query + Zustand
 Rust/Tauri backend
   |-- account cookie capture and refresh
   |-- token-gated localhost stream proxy
-  |-- yt-dlp management and stream resolution
+  |-- yt-dlp/Deno management and stream resolution
   |-- cover/audio cache management
   |-- tray, windows, autostart, notifications
   |-- Windows SMTC/media keys
@@ -220,7 +221,7 @@ window automatically appears in the other.
 - `src/lib/audio-engine.ts` — playback lifecycle, media state, Discord updates,
   timing, and stream changes.
 - `src/lib/stream.ts` — local stream URL coordination and cache metadata.
-- `src/lib/ytdlp.ts` — managed yt-dlp lifecycle hooks.
+- `src/lib/ytdlp.ts` — managed yt-dlp/Deno lifecycle hooks and setup UI.
 - `src/lib/query-client.ts` — query caching/persistence budgets.
 - `src/lib/store/playback.ts` — queue, history, repeat, shuffle, autoplay, and
   playback actions. The floating window uses a remote-control bridge.
@@ -248,11 +249,35 @@ window automatically appears in the other.
 - `src-tauri/src/discord.rs` — Discord IPC worker and Tauri commands.
 - `src-tauri/src/lastfm.rs` — Last.fm authentication, signing, scrobble queue,
   love sync, and retry.
-- `src-tauri/src/ytdlp.rs` — managed yt-dlp binary.
+- `src-tauri/src/ytdlp.rs` — managed yt-dlp binary and Deno runtime.
 - `src-tauri/src/appid.rs` — Windows AppUserModelID.
 - `src-tauri/build.rs` — Tauri build plus safe Last.fm credential injection.
 - `src-tauri/tauri.conf.json` — product/version, windows, CSP, bundle, updater.
 - `src-tauri/capabilities/default.json` — Tauri permissions/capabilities.
+
+### Playback runtime contract
+
+- Browsing and search are available signed out. Playback is enabled only after
+  the signed-in account passes the YouTube Music/YouTube Premium check. The
+  gate and the extractor are deliberately separate: yt-dlp never receives the
+  account cookie jar, so private uploads still need a future narrowly scoped
+  authenticated streaming design.
+- Current yt-dlp releases require an external JavaScript runtime for full
+  YouTube signature/challenge support. Goosic downloads the official Deno
+  release archive beside yt-dlp on first run (roughly 50 MB), validates the
+  extracted executable, and installs it through a temporary file + atomic
+  replacement. Deno is MIT-licensed and comes from `denoland/deno` releases.
+- Deno refresh is best-effort and capped to once every 90 days. If GitHub or
+  the runtime download is unavailable, playback continues with yt-dlp's
+  `tv,android_vr` client fallback. With Deno ready, `web_safari` is added for
+  formats that require JavaScript challenge solving.
+- The local stream URL is preflighted with a one-byte Range request before it
+  reaches `HTMLAudioElement`. This lets resolver HTTP failures retain yt-dlp's
+  diagnostic instead of collapsing into "no supported source". The media
+  element and `play()` rejection paths are deduplicated per load generation.
+- Refresh redirects must use Axum's `OriginalUri`. `Router::nest` strips the
+  per-launch token from the handler URI; redirecting that rewritten path sends
+  the retry to an un-tokened 404.
 
 ## 7. Approved visual language
 
@@ -889,6 +914,14 @@ persisted and synchronized across native windows.
 
 At the time this document was last refreshed:
 
+- The unreleased working tree hardens playback against current YouTube
+  challenges with managed Deno, preserves resolver diagnostics through a
+  one-byte preflight, validates cached containers, and fixes token-preserving
+  refresh retries. It also drains library continuations fail-closed for cache
+  cleanup, scopes playlist parsing away from suggestions, supports exact
+  per-entry playlist removal, validates lyrics provider metadata, and repairs
+  the collapsed-sidebar Library hit target. The app version remains `0.4.6`
+  until an explicit release is prepared.
 - `v0.4.6` is public with Windows, Linux, and universal macOS artifacts. It
   adds shared sidebar glass, Default/Modern bottom-player layouts, global glass
   opacity/blur controls, native drag prevention, and lower WebView2 memory use.
