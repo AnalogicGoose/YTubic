@@ -306,4 +306,21 @@ describe("collectFullPlaylistTracks", () => {
       "Repeated playlist continuation token",
     );
   });
+
+  it("stops a strict continuation drain when playlist preparation is cancelled", async () => {
+    const controller = new AbortController();
+    const load = async (): Promise<PlaylistNextPage> => {
+      controller.abort();
+      return {
+        tracks: [track("second", "set-second")],
+        continuationToken: "PAGE_3",
+      };
+    };
+
+    await expect(
+      collectFullPlaylistTracks(first, load, true, {
+        signal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+  });
 });

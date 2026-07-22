@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-web-player-load"
+description = "Enables the web_player_load command without any pre-configured scope."
+commands.allow = ["web_player_load"]
+
+[[permission]]
+identifier = "deny-web-player-load"
+description = "Denies the web_player_load command without any pre-configured scope."
+commands.deny = ["web_player_load"]

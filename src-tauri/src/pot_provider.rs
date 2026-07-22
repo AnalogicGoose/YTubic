@@ -51,6 +51,15 @@ struct ProviderProcess {
     child: Child,
 }
 
+impl Drop for ProviderProcess {
+    fn drop(&mut self) {
+        // `ensure` is raced against playlist cancellation. Until a healthy
+        // launch is committed to `PROCESS`, this guard owns the child locally;
+        // dropping that future must terminate Deno instead of orphaning it.
+        let _ = self.child.start_kill();
+    }
+}
+
 #[derive(Clone, Debug)]
 struct ProviderPaths {
     root: PathBuf,
@@ -88,6 +97,23 @@ pub fn needs_setup(app: &tauri::AppHandle) -> bool {
 
 pub fn current_config() -> Option<ProviderConfig> {
     ACTIVE_CONFIG.read().ok().and_then(|guard| guard.clone())
+}
+
+/// Report whether the currently advertised provider still has a live child
+/// and answers the pinned-version health check. The explicit downloader uses
+/// this only after a failed provider-backed attempt so a crash can be repaired
+/// once without retrying ordinary extractor failures.
+pub async fn current_is_healthy() -> bool {
+    let Some(config) = current_config() else {
+        return false;
+    };
+    let alive = {
+        let mut process = PROCESS.lock().await;
+        process
+            .as_mut()
+            .is_some_and(|running| running.child.try_wait().ok().flatten().is_none())
+    };
+    alive && provider_is_healthy(&config.base_url).await
 }
 
 fn set_current(config: Option<ProviderConfig>) {
@@ -469,27 +495,27 @@ async fn launch_provider(paths: &ProviderPaths, deno: &Path) -> Result<ProviderC
             .to_path_buf(),
         base_url: format!("http://127.0.0.1:{port}"),
     };
-    *PROCESS.lock().await = Some(ProviderProcess { child });
+    // Keep ownership local while health checking. `wait_or_cancel` may drop
+    // this future at any await point; ProviderProcess::drop then kills the
+    // uncommitted child. Only a version-verified healthy process enters the
+    // global lifecycle slot.
+    let mut process = ProviderProcess { child };
 
     let deadline = tokio::time::Instant::now() + START_TIMEOUT;
     loop {
-        let exited = {
-            let mut process = PROCESS.lock().await;
-            process
-                .as_mut()
-                .and_then(|running| running.child.try_wait().ok().flatten())
-                .is_some()
-        };
+        let exited = process.child.try_wait().ok().flatten().is_some();
         if exited {
-            stop_running().await;
+            let _ = process.child.wait().await;
             return Err("PO provider exited before becoming ready".into());
         }
         if provider_is_healthy(&config.base_url).await {
+            *PROCESS.lock().await = Some(process);
             set_current(Some(config.clone()));
             return Ok(config);
         }
         if tokio::time::Instant::now() >= deadline {
-            stop_running().await;
+            let _ = process.child.start_kill();
+            let _ = tokio::time::timeout(Duration::from_secs(3), process.child.wait()).await;
             return Err("PO provider health check timed out".into());
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -518,6 +544,13 @@ pub async fn ensure(
             return Ok(config);
         }
         stop_running().await;
+    } else {
+        // Heal any orphaned global slot left by an older build or an
+        // interrupted lifecycle transition before starting another provider.
+        let has_orphan = PROCESS.lock().await.is_some();
+        if has_orphan {
+            stop_running().await;
+        }
     }
 
     if !force_retry && retry_is_delayed() {

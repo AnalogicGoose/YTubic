@@ -1,11 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { relaunch } from "@tauri-apps/plugin-process";
 import {
   ArrowDownWideNarrowIcon,
-  CalendarClockIcon,
   ChevronDownIcon,
   DatabaseIcon,
   FolderIcon,
@@ -16,6 +15,7 @@ import {
   Loader2Icon,
   LockIcon,
   MusicIcon,
+  PlayIcon,
   Trash2Icon,
   type LucideIcon,
 } from "lucide-react";
@@ -32,17 +32,19 @@ import {
 import { SegmentedControl } from "@/components/ui/segmented";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Group, SettingRow, TabPane } from "@/components/settings/primitives";
-import { PERIOD_MS as AUTO_CLEAN_PERIOD_MS } from "@/lib/cache-cleanup";
-import { formatBytes, formatDateTime, formatRelative } from "@/lib/format";
+import { formatBytes, formatRelative } from "@/lib/format";
 import { fetchLibraryTracks } from "@/lib/innertube/library";
-import { clearPrefetchMemo } from "@/lib/stream";
+import { useOfflineDownloadStore } from "@/lib/store/offline-downloads";
 import { usePremiumStore } from "@/lib/store/premium";
-import {
-  useSettingsStore,
-  type CacheAutoCleanPeriod,
-} from "@/lib/store/settings";
+import { openPremiumGate } from "@/lib/store/premium-gate";
+import { usePlaybackStore } from "@/lib/store/playback";
 import type { ShelfItem } from "@/lib/innertube/types";
 import { cn } from "@/lib/utils";
+import {
+  listOfflineTracks,
+  OFFLINE_LIBRARY_QUERY_KEY,
+  type OfflineTrackEntry as CacheEntry,
+} from "@/lib/offline-library";
 
 export function StorageTab() {
   const loggedIn = useQuery({
@@ -58,12 +60,6 @@ export function StorageTab() {
       <StorageStats />
       <TabPane>
         <CacheFolderGroup />
-        {/* Auto-clean lives outside the premium-gated tracks group: the
-            sweep prunes whatever is already on disk, so it stays useful
-            (and visible) even when caching itself is gated off. */}
-        <Group>
-          <AutoCleanRow loggedIn={!!loggedIn.data} />
-        </Group>
         <CoverCacheGroup />
         {/* The track list is intentionally the last block on the tab. */}
         <CacheGroupGate loggedIn={!!loggedIn.data} />
@@ -104,8 +100,8 @@ function StatCard({
  */
 function StorageStats() {
   const cache = useQuery({
-    queryKey: ["cache-list"],
-    queryFn: () => invoke<CacheEntry[]>("list_cache"),
+    queryKey: OFFLINE_LIBRARY_QUERY_KEY,
+    queryFn: listOfflineTracks,
   });
   const covers = useQuery({
     queryKey: ["cover-cache-stats"],
@@ -122,7 +118,7 @@ function StorageStats() {
     <div className="grid grid-cols-3 gap-3 pb-4">
       <StatCard
         icon={MusicIcon}
-        label="Cached tracks"
+        label="Offline tracks"
         value={cache.data ? String(cache.data.length) : "…"}
       />
       <StatCard
@@ -162,7 +158,7 @@ function CacheFolderGroup() {
     try {
       await invoke("set_cache_dir", { path });
       await qc.invalidateQueries({ queryKey: ["cache-dir"] });
-      toast.success("Cache folder updated", {
+      toast.success("Offline download folder updated", {
         description:
           "Existing files stay where they are; new downloads use the new folder after a restart.",
         action: { label: "Restart now", onClick: () => void relaunch() },
@@ -184,7 +180,7 @@ function CacheFolderGroup() {
     <Group>
       <SettingRow
         icon={FolderIcon}
-        title="Cache folder"
+        title="Offline download folder"
         description={
           info.data ? (
             <span className="break-all">
@@ -228,10 +224,14 @@ function CacheFolderGroup() {
 
 function CacheGroupGate({ loggedIn }: { loggedIn: boolean }) {
   const premium = usePremiumStore((s) => s.status);
-  if (premium !== "premium") {
-    return <PremiumGatedCacheGroup loggedIn={loggedIn} />;
-  }
-  return <CacheGroup loggedIn={loggedIn} />;
+  return (
+    <>
+      {premium !== "premium" ? (
+        <PremiumGatedCacheGroup loggedIn={loggedIn} />
+      ) : null}
+      <CacheGroup loggedIn={loggedIn} />
+    </>
+  );
 }
 
 function PremiumGatedCacheGroup({ loggedIn }: { loggedIn: boolean }) {
@@ -241,11 +241,11 @@ function PremiumGatedCacheGroup({ loggedIn }: { loggedIn: boolean }) {
       <SettingRow
         icon={LockIcon}
         iconClassName="text-amber-600 dark:text-amber-400"
-        title="Track caching is Premium-only"
+        title="Offline downloads require Premium"
         description={
           loggedIn
-            ? "No active Premium subscription found on this account. Detection reads YT Music's account menu; if it got you wrong, re-check after a moment."
-            : "Sign in with a Google account that has YouTube Premium to keep played tracks on disk."
+            ? "Existing downloads stay visible and removable. Re-check if this account should be able to download more."
+            : "Existing downloads stay visible and removable. Sign in with YouTube Music Premium to download more."
         }
         control={
           loggedIn ? (
@@ -266,17 +266,6 @@ function PremiumGatedCacheGroup({ loggedIn }: { loggedIn: boolean }) {
   );
 }
 
-type CacheEntry = {
-  videoId: string;
-  size: number;
-  modifiedSecs: number;
-  // Written to a sidecar when the track was cached (see saveTrackMeta).
-  // Present for tracks cached since that landed; absent for older files,
-  // which fall back to the library walk and then the raw videoId.
-  title?: string;
-  artist?: string;
-};
-
 type FilterMode = "all" | "library" | "other";
 type SortMode = "newest" | "oldest" | "largest";
 
@@ -285,49 +274,6 @@ const SORT_LABELS: Record<SortMode, string> = {
   oldest: "Oldest",
   largest: "Largest",
 };
-
-const AUTO_CLEAN_OPTIONS: { value: CacheAutoCleanPeriod; label: string }[] = [
-  { value: "off", label: "Off" },
-  { value: "daily", label: "Daily" },
-  { value: "weekly", label: "Weekly" },
-  { value: "monthly", label: "Monthly" },
-];
-
-function AutoCleanRow({ loggedIn }: { loggedIn: boolean }) {
-  const period = useSettingsStore((s) => s.cacheAutoClean);
-  const setPeriod = useSettingsStore((s) => s.setCacheAutoClean);
-  const lastCleanAt = useSettingsStore((s) => s.lastCacheCleanAt);
-
-  // Mirror the sweep's own scheduling (cache-cleanup.ts): the next run
-  // is due one period after the last completed sweep. Before the first
-  // sweep (lastCleanAt === 0) or once that moment has already passed, the
-  // 30-min background tick fires it on its next check rather than at a
-  // fixed clock time, so we say "due" instead of showing a stale date.
-  const description = (() => {
-    if (period === "off") return undefined;
-    if (!loggedIn) return "Sign in to enable automatic clean-up.";
-    const nextAt = lastCleanAt + AUTO_CLEAN_PERIOD_MS[period];
-    if (!lastCleanAt || nextAt <= Date.now())
-      return "Next clean-up is due — runs on the next check.";
-    return `Next clean-up ${formatDateTime(nextAt)}`;
-  })();
-
-  return (
-    <SettingRow
-      icon={CalendarClockIcon}
-      title="Auto-clean tracks not in library"
-      description={description}
-      control={
-        <SegmentedControl
-          value={period}
-          onChange={setPeriod}
-          options={AUTO_CLEAN_OPTIONS}
-          disabled={!loggedIn}
-        />
-      }
-    />
-  );
-}
 
 function CacheGroup({ loggedIn }: { loggedIn: boolean }) {
   const qc = useQueryClient();
@@ -383,10 +329,10 @@ function CacheGroup({ loggedIn }: { loggedIn: boolean }) {
   }, []);
 
   const cache = useQuery({
-    queryKey: ["cache-list"],
-    queryFn: () => invoke<CacheEntry[]>("list_cache"),
-    // Disk state changes outside React's knowledge while streams download —
-    // re-fetch every 5s so the list reflects new cache entries.
+    queryKey: OFFLINE_LIBRARY_QUERY_KEY,
+    queryFn: listOfflineTracks,
+    // Disk state changes outside React's knowledge while playlist downloads
+    // run — re-fetch every 5s so the list reflects finalized files.
     refetchInterval: 5_000,
   });
 
@@ -415,36 +361,46 @@ function CacheGroup({ loggedIn }: { loggedIn: boolean }) {
   // disabled/logged-out, resolved, or errored), which is exactly the
   // window we want to mask.
   const libraryLoading = library.isLoading;
+  const identityFor = useCallback(
+    (entry: CacheEntry) => entry.displayVideoId ?? entry.videoId,
+    [],
+  );
+  const isInLibrary = useCallback(
+    (entry: CacheEntry) => libraryMeta.has(identityFor(entry)),
+    [identityFor, libraryMeta],
+  );
+  // A legacy sidecar cannot tell us whether its stream id was an alternate
+  // music-video id. Treat unmapped entries as unknown, not safe-to-delete.
+  const isKnownOther = useCallback(
+    (entry: CacheEntry) =>
+      (entry.displayVideoId !== undefined || libraryMeta.has(entry.videoId)) &&
+      !isInLibrary(entry),
+    [isInLibrary, libraryMeta],
+  );
 
   const filtered = useMemo(() => {
     let list = cache.data ?? [];
-    if (filter === "library")
-      list = list.filter((e) => libraryMeta.has(e.videoId));
-    else if (filter === "other")
-      list = list.filter((e) => !libraryMeta.has(e.videoId));
+    if (filter === "library") list = list.filter(isInLibrary);
+    else if (filter === "other") list = list.filter(isKnownOther);
     const sorted = [...list].sort((a, b) => {
       if (sort === "newest") return b.modifiedSecs - a.modifiedSecs;
       if (sort === "oldest") return a.modifiedSecs - b.modifiedSecs;
       return b.size - a.size;
     });
     return sorted;
-  }, [cache.data, filter, sort, libraryMeta]);
+  }, [cache.data, filter, sort, isInLibrary, isKnownOther]);
 
   const totalBytes = (cache.data ?? []).reduce((a, e) => a + e.size, 0);
-  const inLibraryCount = (cache.data ?? []).filter((e) =>
-    libraryMeta.has(e.videoId),
-  ).length;
-  const otherCount = (cache.data ?? []).length - inLibraryCount;
+  const inLibraryCount = (cache.data ?? []).filter(isInLibrary).length;
+  const otherCount = (cache.data ?? []).filter(isKnownOther).length;
 
   const deleteEntries = async (ids: string[], label: string) => {
     try {
       const freed = await invoke<number>("delete_cache_entries", {
         videoIds: ids,
       });
-      await qc.invalidateQueries({ queryKey: ["cache-list"] });
-      // Drop the in-memory prefetch log: anything we'd previously marked as
-      // "warm" might now be gone from disk and should be re-prefetchable.
-      clearPrefetchMemo();
+      await qc.invalidateQueries({ queryKey: OFFLINE_LIBRARY_QUERY_KEY });
+      useOfflineDownloadStore.getState().remove(ids.length ? ids : undefined);
       toast.success(`${label} — freed ${formatBytes(freed)}`);
     } catch (e) {
       toast.error(String(e));
@@ -465,28 +421,29 @@ function CacheGroup({ loggedIn }: { loggedIn: boolean }) {
     if (!cache.data?.length) return;
     if (
       !confirm(
-        `Delete all ${cache.data.length} cached tracks (${formatBytes(
+        `Delete all ${cache.data.length} downloaded tracks (${formatBytes(
           totalBytes,
-        )})? Tracks from your library will be removed too.`,
+        )})? This removes the local files only.`,
       )
     )
       return;
     setBulkBusy(true);
-    await deleteEntries([], "Cleared cache");
+    await deleteEntries(
+      cache.data.map((entry) => entry.videoId),
+      "Cleared offline downloads",
+    );
     setBulkBusy(false);
   };
 
   const clearOthers = async () => {
-    const ids = (cache.data ?? [])
-      .filter((e) => !libraryMeta.has(e.videoId))
-      .map((e) => e.videoId);
+    const ids = (cache.data ?? []).filter(isKnownOther).map((e) => e.videoId);
     if (!ids.length) {
-      toast.info("Nothing to clear — everything cached is in your library.");
+      toast.info("Nothing to clear — every download is in your library.");
       return;
     }
     if (
       !confirm(
-        `Delete ${ids.length} cached tracks that aren't in your library?`,
+        `Delete ${ids.length} downloaded tracks that aren't in your library?`,
       )
     )
       return;
@@ -506,7 +463,7 @@ function CacheGroup({ loggedIn }: { loggedIn: boolean }) {
         </div>
         <div className="min-w-0 flex-1">
           <span className="text-[15px] font-medium leading-none">
-            Cached tracks
+            Offline downloads
           </span>
         </div>
         <div className="flex shrink-0 items-center gap-2">
@@ -524,7 +481,7 @@ function CacheGroup({ loggedIn }: { loggedIn: boolean }) {
             size="sm"
             onClick={clearOthers}
             // Also gated on the library set having actually loaded —
-            // before that, EVERY cached track counts as "other" and one
+            // before that, EVERY downloaded track counts as "other" and one
             // click would nuke the lot.
             disabled={bulkBusy || !library.data || otherCount === 0}
           >
@@ -624,9 +581,9 @@ function CacheGroup({ loggedIn }: { loggedIn: boolean }) {
           ) : filtered.length === 0 ? (
             <div className="py-8 text-center text-sm text-muted-foreground">
               {cache.isError
-                ? "Couldn't read the cache folder."
+                ? "Couldn't read the offline download folder."
                 : cache.data?.length === 0
-                  ? "Cache is empty — tracks land here as you play them."
+                  ? "No offline downloads yet."
                   : "No tracks match this filter."}
             </div>
           ) : (
@@ -634,8 +591,8 @@ function CacheGroup({ loggedIn }: { loggedIn: boolean }) {
               <CacheRow
                 key={entry.videoId}
                 entry={entry}
-                meta={libraryMeta.get(entry.videoId)}
-                inLibrary={libraryMeta.has(entry.videoId)}
+                meta={libraryMeta.get(identityFor(entry))}
+                inLibrary={isInLibrary(entry)}
                 libraryLoading={libraryLoading}
                 isDeleting={pending.has(entry.videoId)}
                 onDelete={() => deleteOne(entry.videoId)}
@@ -663,12 +620,13 @@ function CacheRow({
   isDeleting: boolean;
   onDelete: () => void;
 }) {
+  const premium = usePremiumStore((state) => state.status === "premium");
   // YouTube publishes thumbnails for every videoId on a public CDN, so we
   // can render one without needing a real API round-trip just to draw
   // this row.
   const thumb = `https://i.ytimg.com/vi/${entry.videoId}/mqdefault.jpg`;
   // Prefer the library walk (freshest, structured), then the on-disk
-  // sidecar written when the track was cached, then the raw videoId.
+  // sidecar written when the track was downloaded, then the raw videoId.
   const title = meta?.title ?? entry.title ?? entry.videoId;
   const subtitle =
     meta?.artists?.map((a) => a.name).join(", ") ||
@@ -679,7 +637,7 @@ function CacheRow({
   // longer does when a sidecar exists. Only skeleton the title while the
   // walk is in flight AND we have no title from either source yet — that's
   // the one case where a name might still appear. The timestamp below is
-  // derived from cache metadata we already have, so it stays visible
+  // derived from file metadata we already have, so it stays visible
   // throughout.
   const resolving = libraryLoading && !meta && !entry.title;
 
@@ -731,6 +689,11 @@ function CacheRow({
                   <LibraryIcon className="size-3" />
                 </Badge>
               )}
+              {!entry.valid ? (
+                <Badge variant="destructive" title="This file needs repair">
+                  Needs repair
+                </Badge>
+              ) : null}
             </>
           )}
         </div>
@@ -745,9 +708,34 @@ function CacheRow({
       <Button
         variant="ghost"
         size="icon"
+        disabled={isDeleting || !entry.valid}
+        aria-label="Play downloaded track"
+        title={entry.valid ? "Play downloaded" : "This file needs repair"}
+        onClick={() => {
+          if (!premium) {
+            openPremiumGate();
+            return;
+          }
+          usePlaybackStore.getState().playNow({
+            videoId: entry.displayVideoId ?? entry.videoId,
+            playbackMode: "offline",
+            offlineVideoId: entry.videoId,
+            title,
+            subtitle,
+            thumbnails: [{ url: thumb, width: 320, height: 180 }],
+            source: "user",
+          });
+        }}
+        className="text-muted-foreground hover:text-foreground"
+      >
+        <PlayIcon className="size-4 fill-current" />
+      </Button>
+      <Button
+        variant="ghost"
+        size="icon"
         onClick={onDelete}
         disabled={isDeleting}
-        aria-label="Delete cached track"
+        aria-label="Delete offline track"
         className="text-muted-foreground hover:text-destructive"
       >
         {isDeleting ? (

@@ -20,7 +20,6 @@ import { WhatsNewDialog } from "@/components/layout/whats-new-dialog";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useAudioEngine } from "@/lib/audio-engine";
-import { useCacheAutoClean } from "@/lib/cache-cleanup";
 import { usePlaybackNotifications } from "@/lib/playback-notifications";
 import { useLastfmScrobbler } from "@/lib/lastfm-scrobbler";
 import { useYtdlpSetup } from "@/lib/ytdlp";
@@ -32,7 +31,7 @@ import { usePremiumStatusSync } from "@/lib/store/premium";
 import {
   useCloseBehaviorSync,
   useDiscordPresenceSync,
-  useLiquidRefractionClass,
+  useGlassPlatformClasses,
   useSettingsStore,
 } from "@/lib/store/settings";
 import { useWindowHidden } from "@/hooks/use-window-hidden";
@@ -96,8 +95,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   useGlobalShortcuts();
   useCloseBehaviorSync();
   useDiscordPresenceSync();
-  useLiquidRefractionClass();
-  useCacheAutoClean();
+  useGlassPlatformClasses();
   usePlaybackNotifications();
   useLastfmScrobbler();
   const mode = useLayoutStore((s) => s.mode);
@@ -200,16 +198,21 @@ export function AppShell({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
   useEffect(() => {
     let cancelled = false;
-    let dispose: (() => void) | undefined;
-    void listen<{ id: string }>("nav:artist", (e) => {
-      void navigate({ to: "/artist/$id", params: { id: e.payload.id } });
-    }).then((un) => {
-      if (cancelled) un();
-      else dispose = un;
+    const disposers: Array<() => void> = [];
+    void Promise.all([
+      listen<{ id: string }>("nav:artist", (e) => {
+        void navigate({ to: "/artist/$id", params: { id: e.payload.id } });
+      }),
+      listen<{ id: string }>("nav:album", (e) => {
+        void navigate({ to: "/album/$id", params: { id: e.payload.id } });
+      }),
+    ]).then((listeners) => {
+      if (cancelled) listeners.forEach((unlisten) => unlisten());
+      else disposers.push(...listeners);
     });
     return () => {
       cancelled = true;
-      dispose?.();
+      disposers.forEach((unlisten) => unlisten());
     };
   }, [navigate]);
 

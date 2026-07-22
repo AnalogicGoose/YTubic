@@ -1,12 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
-  "windows": [
-    "main",
-    "player"
-  ],
+  "description": "Local-only capability for the bundled Goosic main window",
+  "local": true,
+  "windows": ["main"],
   "permissions": [
+    "main-window-commands",
     "core:default",
     "opener:default",
     {

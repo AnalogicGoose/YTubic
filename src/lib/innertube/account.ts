@@ -35,9 +35,7 @@ export async function fetchAccountInfo(): Promise<AccountInfo | null> {
 
   const readText = (node: YtNode | undefined): string =>
     node?.simpleText ??
-    (node?.runs ?? [])
-      .map((r: YtNode) => r?.text ?? "")
-      .join("") ??
+    (node?.runs ?? []).map((r: YtNode) => r?.text ?? "").join("") ??
     "";
 
   const name = readText(header.accountName);
@@ -59,22 +57,23 @@ export async function fetchAccountInfo(): Promise<AccountInfo | null> {
  * So we collect the visible text of every menu item, then:
  *   - If any item matches an upsell pattern → Free.
  *   - Else if any item matches a manage-membership pattern → Premium.
- *   - Else → Premium (the upsell would be there if the user were Free;
- *     YT shows it unconditionally, including for users who recently
- *     dismissed a related banner). Falling back to Free here would
- *     lock paying users out of caching when our patterns drift.
+ *   - Else → Premium. YouTube inserts a branded Premium upsell for signed-in
+ *     Free accounts; the live menu for a Premium account omits that entry.
  *
  * Returns `null` when not signed in so the caller can show the right
  * gate ("sign in" vs "upgrade").
  */
 export async function fetchPremiumStatus(): Promise<PremiumStatus> {
-  let json: YtNode;
-  try {
-    json = await innertubePost("account/account_menu", {});
-  } catch {
-    return null;
-  }
+  // Keep transport failure distinct from an anonymous response. The caller
+  // may grant a short, account-scoped offline grace for already-downloaded
+  // tracks, but must not treat a real signed-out response as Premium.
+  const json: YtNode = await innertubePost("account/account_menu", {});
 
+  return detectPremiumStatusFromMenu(json);
+}
+
+/** Pure account-menu classifier kept exported for regression tests. */
+export function detectPremiumStatusFromMenu(json: YtNode): PremiumStatus {
   const popup: YtNode | undefined =
     json?.actions?.[0]?.openPopupAction?.popup?.multiPageMenuRenderer;
   const header: YtNode | undefined = popup?.header?.activeAccountHeaderRenderer;
@@ -110,39 +109,30 @@ export async function fetchPremiumStatus(): Promise<PremiumStatus> {
     for (const k of Object.keys(obj)) stack.push(obj[k]);
   }
 
-  if (import.meta.env.DEV) {
-    console.debug(
-      "[premium] account_menu labels:",
-      labels.filter((s) => /premium|музык|музыка|premium/i.test(s)),
-    );
+  const premiumBrand = /\b(?:music\s*)?premium\b/i;
+  const memberSignal =
+    /manage|cancel|membership|member|gestionar|gestiona|administrar|administra|membres[ií]a|miembro|suscripci[oó]n|gerenciar|assinatura|membro|управл|подписк/i;
+  const freeSignal =
+    /get|try|start|join|upgrade|unlock|subscribe|trial|ended|hol\s*dir|obt[eé]n|obtener|prueba|probar|empieza|comienza|[uú]nete|mejora|desbloquea|suscr[ií]bete|assine|experimente|comece|obtenha|получ|оформ|підписат|попроб/i;
+
+  // Positive membership wording wins when the menu includes the Premium
+  // brand (for example, English "Manage membership" or Spanish
+  // "Gestionar la membresía").
+  for (const label of labels) {
+    if (premiumBrand.test(label) && memberSignal.test(label)) return "premium";
   }
 
-  // Free signals — first verb identifies the upsell shape, the second
-  // group catches both "Music Premium" and "YouTube Premium" mentions.
-  // 40-char window so localized phrasings ("Hol dir Music Premium",
-  // "Получить Music Premium") still hit.
-  const upsell =
-    /\b(get|try|start|join|upgrade|unlock|subscribe|hol\s*dir|получ|оформ|підписат|попроб)\b[\s\S]{0,40}\b(music\s*)?premium\b/i;
-  const upsellSuffix =
-    /\b(music\s*)?premium\b[\s\S]{0,40}\b(now|today)\b/i;
-  for (const s of labels) {
-    if (upsell.test(s) || upsellSuffix.test(s)) return "free";
+  // Free accounts receive a Premium upsell. Recognized calls to action are
+  // classified first; any other branded Premium entry is conservatively an
+  // upsell because the live Premium menu omits the branded entry entirely.
+  for (const label of labels) {
+    if (premiumBrand.test(label) && freeSignal.test(label)) return "free";
   }
+  if (labels.some((label) => premiumBrand.test(label))) return "free";
 
-  // Premium membership signals — "Manage your Music Premium membership"
-  // / "Music Premium · monthly" / Russian "Управление подпиской Music
-  // Premium" / etc.
-  const member =
-    /\b(manage|your|cancel|membership|member|управл|подписк|подписк[аи])\b[\s\S]{0,40}\b(music\s*)?premium\b/i;
-  for (const s of labels) {
-    if (member.test(s)) return "premium";
-  }
-
-  // Signed in, no upsell text found anywhere in the menu, no explicit
-  // member text either. YT *always* shows an upsell for Free users —
-  // the most likely explanation is that the localized phrasing didn't
-  // match our patterns. Falling back to "premium" keeps paying users
-  // unblocked; the worst-case mistake (a Free user with caching) is
-  // less damaging than locking a Premium user out of a paid feature.
+  // Signed in with no branded upsell. This is YouTube Music's live Premium
+  // menu shape and was confirmed against the account-menu response used by
+  // the app. Transport failures never reach this branch, and anonymous menus
+  // were rejected above.
   return "premium";
 }

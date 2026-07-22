@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { CheckIcon, Loader2Icon, UsersRoundIcon } from "lucide-react";
@@ -36,23 +37,40 @@ export function ChannelPickerDialog() {
   // `isSelected`: we never flip the selection server-side, we only
   // send the page id per request.
   const currentPageId = active?.pageId ?? null;
+  const promptedAccounts = useRef(new Set<string>());
+  const needsPlaybackIdentityVerification =
+    active?.webPlayerIdentityVerified === false ||
+    (Boolean(active?.pageId) && active?.webPlayerIdentityVerified !== true);
+
+  useEffect(() => {
+    if (!active?.id || !needsPlaybackIdentityVerification) return;
+    if (promptedAccounts.current.has(active.id)) return;
+    promptedAccounts.current.add(active.id);
+    setOpen(true);
+  }, [active?.id, needsPlaybackIdentityVerification, setOpen]);
 
   const channels = useQuery({
-    queryKey: ["channel-list"],
+    queryKey: ["channel-list", active?.id ?? null],
     queryFn: fetchChannelList,
-    enabled: open,
+    enabled: open && Boolean(active?.id),
     staleTime: 5 * 60_000,
     retry: false,
   });
 
   const pick = async (c: ChannelChoice) => {
     if (!active) return;
+    if (!c.signinUrl) {
+      toast.error(
+        "YouTube did not provide a safe channel switch token. Try again.",
+      );
+      return;
+    }
     setOpen(false);
-    if ((c.pageId ?? null) === currentPageId) return;
     try {
       await invoke("set_account_channel", {
         id: active.id,
         pageId: c.pageId,
+        signinUrl: c.signinUrl,
         channelName: c.name,
         channelPhotoUrl: c.photoUrl ?? null,
       });

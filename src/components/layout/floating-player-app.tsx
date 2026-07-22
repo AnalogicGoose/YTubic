@@ -20,7 +20,7 @@ import { useLayoutStore } from "@/lib/store/layout";
 import { cn } from "@/lib/utils";
 import { queryClient } from "@/lib/query-client";
 import { isWindowsWebview } from "@/lib/platform";
-import { useLiquidRefractionClass } from "@/lib/store/settings";
+import { useGlassPlatformClasses } from "@/lib/store/settings";
 
 // Wire the store's user-facing actions to emit Tauri events instead of
 // mutating local state directly — only the main window's audio engine
@@ -38,7 +38,7 @@ initFloatingTrackSourceBridge();
  * `<PlayerBar variant="floating">`.
  */
 export default function FloatingPlayerApp() {
-  useLiquidRefractionClass();
+  useGlassPlatformClasses();
   const nativeMaterial = new URLSearchParams(window.location.search).get(
     "native-player-material",
   );

@@ -1,19 +1,23 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
-import { useInfiniteQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import {
   AlertCircleIcon,
   ArrowDownAZIcon,
   CheckIcon,
+  DownloadIcon,
+  HardDriveIcon,
   Loader2Icon,
   PinIcon,
   PinOffIcon,
   SearchIcon,
+  SquareIcon,
   XIcon,
 } from "lucide-react";
 import {
   fetchPlaylistContinuation,
   fetchPlaylistFirstPage,
+  fetchPlaylistStrict,
   type PlaylistFirstPage,
   type PlaylistNextPage,
 } from "@/lib/innertube/playlist";
@@ -40,6 +44,25 @@ import {
   usePlaylistSortStore,
   type PlaylistSortMode,
 } from "@/lib/store/playlist-sort";
+import { toast } from "sonner";
+import { usePremiumStore } from "@/lib/store/premium";
+import { useAccounts } from "@/lib/store/accounts";
+import { openPremiumGate } from "@/lib/store/premium-gate";
+import {
+  cancelPlaylistDownload,
+  offlineIdentityKey,
+  playlistDownloadKey,
+  retryPlaylistDownload,
+  startPlaylistDownload,
+  useOfflinePlaylistStore,
+  usePlaylistDownloadStore,
+} from "@/lib/store/playlist-downloads";
+import {
+  availableOfflineQueue,
+  listOfflineTracks,
+  OFFLINE_LIBRARY_QUERY_KEY,
+  offlineQueueForPlaylist,
+} from "@/lib/offline-library";
 
 export const Route = createFileRoute("/playlist/$id")({
   component: PlaylistPageView,
@@ -64,6 +87,68 @@ function PlaylistPageView() {
   const pin = usePinnedPlaylistsStore((s) => s.pin);
   const unpin = usePinnedPlaylistsStore((s) => s.unpin);
   const isLikedSongs = id === "LM" || id === "VLLM";
+  const premiumStatus = usePremiumStore((state) => state.status);
+  const premiumSource = usePremiumStore((state) => state.source);
+  const canPlayDownloaded = premiumStatus === "premium";
+  const canDownload = canPlayDownloaded && premiumSource === "live";
+  const accounts = useAccounts();
+  const activeAccount = accounts.data?.find((account) => account.isActive);
+  const identityKey = activeAccount
+    ? offlineIdentityKey(activeAccount.id, activeAccount.pageId)
+    : null;
+  const scopedPlaylistKey = identityKey
+    ? playlistDownloadKey(identityKey, id)
+    : null;
+  const batch = usePlaylistDownloadStore((state) =>
+    scopedPlaylistKey ? state.batches[scopedPlaylistKey] : undefined,
+  );
+  const manifest = useOfflinePlaylistStore((state) =>
+    identityKey ? state.manifestsByIdentity[identityKey]?.[id] : undefined,
+  );
+  const [preparingDownload, setPreparingDownload] = useState(false);
+  const [preparingOfflinePlayback, setPreparingOfflinePlayback] =
+    useState(false);
+  const [cooldownClock, setCooldownClock] = useState(() => Date.now());
+  const downloadPreparationAbortRef = useRef<AbortController | null>(null);
+  useEffect(
+    () => () => {
+      downloadPreparationAbortRef.current?.abort();
+    },
+    [id],
+  );
+  const pages = query.data?.pages ?? [];
+  const header = pages[0] as PlaylistFirstPage | undefined;
+  const tracks = useMemo(() => pages.flatMap((page) => page.tracks), [pages]);
+  const offlineLibrary = useQuery({
+    queryKey: OFFLINE_LIBRARY_QUERY_KEY,
+    queryFn: listOfflineTracks,
+    staleTime: 5_000,
+  });
+  const availableOfflineTracks = useMemo(
+    () =>
+      manifest
+        ? availableOfflineQueue(manifest.tracks, offlineLibrary.data ?? [])
+        : offlineQueueForPlaylist(tracks, offlineLibrary.data ?? []),
+    [manifest, tracks, offlineLibrary.data],
+  );
+  const offlineComplete =
+    !!manifest &&
+    manifest.tracks.length > 0 &&
+    availableOfflineTracks.length === manifest.tracks.length;
+  const retryRemainingMs = Math.max(
+    0,
+    (batch?.retryAt ?? 0) - Math.max(cooldownClock, Date.now()),
+  );
+  const retryCoolingDown = retryRemainingMs > 0;
+  useEffect(() => {
+    if (!batch?.retryAt || batch.retryAt <= Date.now()) return;
+    const timer = window.setInterval(() => setCooldownClock(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [batch?.retryAt]);
+  const batchActive =
+    batch?.phase === "preparing" ||
+    batch?.phase === "downloading" ||
+    batch?.phase === "cancelling";
 
   const sortMode = usePlaylistSortStore(
     (s) => s.modes[id] ?? ("default" as PlaylistSortMode),
@@ -73,9 +158,6 @@ function PlaylistPageView() {
   const [searchQuery, setSearchQuery] = useState("");
   const normalizedQuery = searchQuery.trim().toLowerCase();
 
-  const pages = query.data?.pages ?? [];
-  const header = pages[0] as PlaylistFirstPage | undefined;
-  const tracks = useMemo(() => pages.flatMap((p) => p.tracks), [pages]);
   const sortedTracks = useMemo(
     () => sortTracks(tracks, sortMode),
     [tracks, sortMode],
@@ -119,7 +201,12 @@ function PlaylistPageView() {
     );
     obs.observe(el);
     return () => obs.disconnect();
-  }, [query.hasNextPage, query.isFetchingNextPage, query.fetchNextPage, query.error]);
+  }, [
+    query.hasNextPage,
+    query.isFetchingNextPage,
+    query.fetchNextPage,
+    query.error,
+  ]);
 
   // When the user picks any non-default sort, eagerly drain all
   // continuations so the sort applies to the whole playlist, not just
@@ -170,6 +257,124 @@ function PlaylistPageView() {
     header.trackCount ? `${header.trackCount} songs` : undefined,
   ].filter(Boolean) as string[];
 
+  const downloadPlaylist = async () => {
+    if (preparingDownload) {
+      downloadPreparationAbortRef.current?.abort();
+      return;
+    }
+    // Cancellation is never an entitled operation. Keep it available if the
+    // account changes or a live Premium probe expires during a running batch.
+    if (batchActive) {
+      if (identityKey) {
+        await cancelPlaylistDownload(identityKey, id).catch((error) =>
+          toast.error(
+            `Couldn't cancel playlist download: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          ),
+        );
+      }
+      return;
+    }
+    if (retryCoolingDown) {
+      toast.info(
+        "YouTube is rate limiting downloads. Please wait before retrying.",
+      );
+      return;
+    }
+    if (!canDownload) {
+      if (canPlayDownloaded) {
+        toast.info(
+          "Reconnect so Goosic can verify Premium before downloading more music.",
+        );
+      } else {
+        openPremiumGate();
+      }
+      return;
+    }
+    if (batch?.phase === "failed" || batch?.phase === "cancelled") {
+      if (!identityKey) {
+        toast.error("The active YouTube account is still loading.");
+        return;
+      }
+      await retryPlaylistDownload(identityKey, id).catch((error) =>
+        toast.error(
+          `Playlist download failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        ),
+      );
+      return;
+    }
+    const controller = new AbortController();
+    downloadPreparationAbortRef.current = controller;
+    setPreparingDownload(true);
+    try {
+      // The visible route is lazily paginated; offline means the whole
+      // playlist, so use the strict continuation drain before starting.
+      const full = await fetchPlaylistStrict(id, { signal: controller.signal });
+      downloadPreparationAbortRef.current = null;
+      setPreparingDownload(false);
+      await startPlaylistDownload(id, header.title, full.tracks);
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        toast.info("Playlist download preparation cancelled.");
+        return;
+      }
+      toast.error(
+        `Playlist download failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    } finally {
+      if (downloadPreparationAbortRef.current === controller) {
+        downloadPreparationAbortRef.current = null;
+        setPreparingDownload(false);
+      }
+    }
+  };
+
+  const playDownloaded = async () => {
+    if (!canPlayDownloaded) {
+      openPremiumGate();
+      return;
+    }
+    let playableTracks = availableOfflineTracks;
+    let expectedTrackCount = manifest?.tracks.length ?? tracks.length;
+    if (!manifest) {
+      setPreparingOfflinePlayback(true);
+      try {
+        const full = await fetchPlaylistStrict(id);
+        expectedTrackCount = full.tracks.length;
+        playableTracks = offlineQueueForPlaylist(
+          full.tracks,
+          offlineLibrary.data ?? [],
+        );
+      } catch (error) {
+        toast.error(
+          `Couldn't prepare downloaded playlist: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        return;
+      } finally {
+        setPreparingOfflinePlayback(false);
+      }
+    }
+    if (!playableTracks.length) {
+      toast.error("No playable downloaded tracks are available.");
+      return;
+    }
+    const playback = usePlaybackStore.getState();
+    playback.setQueue(playableTracks, 0);
+    playback.setShuffle(false);
+    if (playableTracks.length < expectedTrackCount) {
+      toast.info(
+        `Playing ${playableTracks.length}/${expectedTrackCount} downloaded tracks.`,
+      );
+    }
+  };
+
   return (
     <div className="flex flex-col gap-8 px-6 pb-6 pt-3">
       <EntityHeader
@@ -191,27 +396,80 @@ function PlaylistPageView() {
           }
         }}
         actions={
-          isLikedSongs ? null : pinned ? (
-            <Button variant="outline" onClick={() => unpin(id)}>
-              <PinOffIcon />
-              Unpin
-            </Button>
-          ) : (
+          <>
             <Button
               variant="outline"
-              onClick={() =>
-                pin({
-                  id,
-                  title: header.title,
-                  thumbnailUrl:
-                    header.thumbnails[header.thumbnails.length - 1]?.url,
-                })
-              }
+              onClick={() => void downloadPlaylist()}
+              disabled={batch?.phase === "cancelling" || retryCoolingDown}
             >
-              <PinIcon />
-              Pin to sidebar
+              {preparingDownload || batch?.phase === "downloading" ? (
+                <SquareIcon />
+              ) : batch?.phase === "cancelling" ? (
+                <Loader2Icon className="animate-spin" />
+              ) : batchActive ? (
+                <SquareIcon />
+              ) : (
+                <DownloadIcon />
+              )}
+              {preparingDownload
+                ? "Cancel preparation"
+                : batch?.phase === "downloading"
+                  ? `${batch.completed}/${batch.plan.length}`
+                  : batch?.phase === "cancelling"
+                    ? "Cancelling…"
+                    : batch?.phase === "failed" || batch?.phase === "cancelled"
+                      ? retryCoolingDown
+                        ? `Retry in ${Math.max(
+                            1,
+                            Math.ceil(retryRemainingMs / 60_000),
+                          )}m`
+                        : "Retry download"
+                      : offlineComplete || batch?.phase === "completed"
+                        ? "Update download"
+                        : "Download playlist"}
             </Button>
-          )
+            {availableOfflineTracks.length > 0 ||
+            (!manifest &&
+              (offlineLibrary.data ?? []).some((entry) => entry.valid)) ? (
+              <Button
+                variant="outline"
+                onClick={() => void playDownloaded()}
+                disabled={preparingOfflinePlayback}
+              >
+                {preparingOfflinePlayback ? (
+                  <Loader2Icon className="animate-spin" />
+                ) : (
+                  <HardDriveIcon />
+                )}
+                {preparingOfflinePlayback
+                  ? "Preparing…"
+                  : availableOfflineTracks.length > 0
+                    ? "Play downloaded"
+                    : "Check downloaded"}
+              </Button>
+            ) : null}
+            {isLikedSongs ? null : pinned ? (
+              <Button variant="outline" onClick={() => unpin(id)}>
+                <PinOffIcon />
+                Unpin
+              </Button>
+            ) : (
+              <Button
+                variant="outline"
+                onClick={() =>
+                  pin({
+                    id,
+                    title: header.title,
+                    thumbnailUrl:
+                      header.thumbnails[header.thumbnails.length - 1]?.url,
+                  })
+                }
+              >
+                <PinIcon />
+                Pin to sidebar
+              </Button>
+            )}
+          </>
         }
       />
       <div className="flex flex-col gap-2">
@@ -265,10 +523,7 @@ function PlaylistPageView() {
   );
 }
 
-function sortTracks(
-  tracks: ShelfItem[],
-  mode: PlaylistSortMode,
-): ShelfItem[] {
+function sortTracks(tracks: ShelfItem[], mode: PlaylistSortMode): ShelfItem[] {
   if (mode === "default" || tracks.length < 2) return tracks;
   const copy = tracks.slice();
   switch (mode) {
@@ -286,8 +541,7 @@ function sortTracks(
       copy.sort((a, b) => b.title.localeCompare(a.title));
       break;
     case "artist-asc": {
-      const key = (t: ShelfItem) =>
-        t.artists?.[0]?.name ?? t.subtitle ?? "";
+      const key = (t: ShelfItem) => t.artists?.[0]?.name ?? t.subtitle ?? "";
       copy.sort((a, b) => key(a).localeCompare(key(b)));
       break;
     }

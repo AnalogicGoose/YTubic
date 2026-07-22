@@ -27,7 +27,10 @@ import {
 } from "@/components/ui/tooltip";
 import { Thumbnail } from "@/components/shared/thumbnail";
 import { LikeDislikeButtons } from "@/components/shared/like-buttons";
-import { ArtistLinks } from "@/components/shared/artist-links";
+import {
+  ArtistLinks,
+  TrackTitleLink,
+} from "@/components/shared/artist-links";
 import { QueuePopover } from "@/components/layout/queue-panel";
 import {
   LyricsBody,
@@ -74,6 +77,7 @@ export function PlayerBarBottom({
     shuffle,
     repeat,
     autoRadio,
+    advertisement,
   } = usePlaybackStore(
     useShallow((s) => ({
       playing: s.playing,
@@ -84,6 +88,7 @@ export function PlayerBarBottom({
       shuffle: s.shuffle,
       repeat: s.repeat,
       autoRadio: s.autoRadio,
+      advertisement: s.advertisement,
     })),
   );
   const track = usePlaybackStore(currentTrack);
@@ -176,7 +181,7 @@ export function PlayerBarBottom({
         size="icon"
         aria-label="Previous"
         onClick={prev}
-        disabled={!hasTrack}
+        disabled={!hasTrack || advertisement}
       >
         <SkipBackIcon className="fill-current" />
       </Button>
@@ -184,7 +189,7 @@ export function PlayerBarBottom({
         size="icon"
         aria-label={playing ? "Pause" : "Play"}
         onClick={toggle}
-        disabled={!hasTrack}
+        disabled={!hasTrack || advertisement}
         className="size-12 rounded-full bg-brand text-white hover:bg-brand/90"
       >
         {loading ? (
@@ -262,7 +267,7 @@ export function PlayerBarBottom({
           scrub={scrub}
           setScrub={setScrub}
           seek={seek}
-          disabled={!hasTrack || duration <= 0}
+          disabled={!hasTrack || duration <= 0 || advertisement}
         />
       </div>
       <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
@@ -305,9 +310,11 @@ export function PlayerBarBottom({
               <div className="flex min-w-0 max-w-full items-center gap-2">
                 {cover("size-9", true)}
                 <div className="flex min-w-0 flex-col">
-                  <span className="truncate text-sm font-semibold leading-tight">
-                    {track?.title ?? "Nothing playing"}
-                  </span>
+                  <TrackTitleLink
+                    title={advertisement ? "Advertisement" : (track?.title ?? "Nothing playing")}
+                    albumId={track?.albumId}
+                    className="text-sm font-semibold leading-tight"
+                  />
                   {track ? (
                     <ArtistLinks
                       artists={track.artists}
@@ -376,9 +383,11 @@ export function PlayerBarBottom({
             <div className="flex min-w-0 flex-1 items-center gap-3">
               {cover("size-14", false)}
               <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                <span className="truncate text-base font-semibold leading-tight">
-                  {track?.title ?? "Nothing playing"}
-                </span>
+                <TrackTitleLink
+                  title={advertisement ? "Advertisement" : (track?.title ?? "Nothing playing")}
+                  albumId={track?.albumId}
+                  className="text-base font-semibold leading-tight"
+                />
                 {track ? (
                   <ArtistLinks
                     artists={track.artists}

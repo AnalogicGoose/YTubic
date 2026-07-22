@@ -44,7 +44,7 @@ import {
 import { PLAYER_GLASS_SURFACE_CLASS } from "@/components/ui/glass-surface";
 import { Thumbnail } from "@/components/shared/thumbnail";
 import { LikeDislikeButtons } from "@/components/shared/like-buttons";
-import { ArtistLinks } from "@/components/shared/artist-links";
+import { ArtistLinks, TrackTitleLink } from "@/components/shared/artist-links";
 import { PlayerMoreMenu } from "@/components/layout/player-more-menu";
 import { cn } from "@/lib/utils";
 import { usePlayerCoverDrag } from "@/lib/player-drag";
@@ -114,6 +114,8 @@ export function repeatLabel(repeat: RepeatMode): string {
  * alternate videoId hasn't been resolved yet, we fetch it on demand.
  */
 export function SourceToggle({ track }: { track: QueueTrack }) {
+  const advertisement = usePlaybackStore((s) => s.advertisement);
+  const offline = track.playbackMode === "offline";
   const record = useTrackSourceStore((s) => s.byVideoId[track.videoId]);
   const setSelected = useTrackSourceStore((s) => s.setSelected);
   const setAlternate = useTrackSourceStore((s) => s.setAlternate);
@@ -122,9 +124,10 @@ export function SourceToggle({ track }: { track: QueueTrack }) {
   const selected: SourceKind = record?.selected ?? "song";
 
   const switchTo = async (target: SourceKind) => {
-    if (busy || target === selected) return;
+    if (advertisement || offline || busy || target === selected) return;
     const cachedAlt = target === "video" ? record?.video : record?.song;
     if (cachedAlt) {
+      if (usePlaybackStore.getState().advertisement) return;
       setSelected(track.videoId, target);
       return;
     }
@@ -141,6 +144,10 @@ export function SourceToggle({ track }: { track: QueueTrack }) {
         );
         return;
       }
+      // The lookup is asynchronous. An advertisement may have started while
+      // it was in flight; changing source now would reload the official page
+      // and terminate that break.
+      if (usePlaybackStore.getState().advertisement) return;
       setAlternate(track.videoId, target, altId);
       setSelected(track.videoId, target);
     } catch (e) {
@@ -159,7 +166,7 @@ export function SourceToggle({ track }: { track: QueueTrack }) {
             aria-label="Song version"
             aria-pressed={selected === "song"}
             onClick={() => switchTo("song")}
-            disabled={busy !== null}
+            disabled={advertisement || offline || busy !== null}
             className={cn(
               "flex size-7 items-center justify-center rounded-sm transition-colors",
               selected === "song"
@@ -174,7 +181,9 @@ export function SourceToggle({ track }: { track: QueueTrack }) {
             )}
           </button>
         </TooltipTrigger>
-        <TooltipContent>Song version</TooltipContent>
+        <TooltipContent>
+          {offline ? "Source is fixed for downloaded playback" : "Song version"}
+        </TooltipContent>
       </Tooltip>
       <Tooltip>
         <TooltipTrigger asChild>
@@ -183,7 +192,7 @@ export function SourceToggle({ track }: { track: QueueTrack }) {
             aria-label="Video version"
             aria-pressed={selected === "video"}
             onClick={() => switchTo("video")}
-            disabled={busy !== null}
+            disabled={advertisement || offline || busy !== null}
             className={cn(
               "flex size-7 items-center justify-center rounded-sm transition-colors",
               selected === "video"
@@ -198,7 +207,11 @@ export function SourceToggle({ track }: { track: QueueTrack }) {
             )}
           </button>
         </TooltipTrigger>
-        <TooltipContent>Video version</TooltipContent>
+        <TooltipContent>
+          {offline
+            ? "Source is fixed for downloaded playback"
+            : "Video version"}
+        </TooltipContent>
       </Tooltip>
     </div>
   );
@@ -291,8 +304,12 @@ export function VolumeControl({
 }: {
   direction?: "horizontal" | "vertical";
 }) {
-  const { volume, muted } = usePlaybackStore(
-    useShallow((s) => ({ volume: s.volume, muted: s.muted })),
+  const { volume, muted, advertisement } = usePlaybackStore(
+    useShallow((s) => ({
+      volume: s.volume,
+      muted: s.muted,
+      advertisement: s.advertisement,
+    })),
   );
   const setVolume = usePlaybackStore((s) => s.setVolume);
   const toggleMute = usePlaybackStore((s) => s.toggleMute);
@@ -311,6 +328,7 @@ export function VolumeControl({
     <div
       className="relative flex items-center"
       onWheel={(e) => {
+        if (advertisement) return;
         // Scroll wheel adjusts volume in 5% increments. Wheel-up
         // raises, wheel-down lowers. Unmutes on any change so the
         // change is audible.
@@ -324,7 +342,12 @@ export function VolumeControl({
     >
       <Popover>
         <PopoverTrigger asChild>
-          <Button variant="ghost" size="icon" aria-label="Open volume controls">
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label="Open volume controls"
+            disabled={advertisement}
+          >
             <AnimatePresence mode="popLayout" initial={false}>
               <motion.span
                 key={Icon.displayName ?? Icon.name}
@@ -363,6 +386,7 @@ export function VolumeControl({
                 step={1}
                 className="h-20 min-h-0 [&_[data-slot=slider-track]]:bg-black/15 dark:[&_[data-slot=slider-track]]:bg-white/20"
                 aria-label="Volume"
+                disabled={advertisement}
                 onValueChange={([v]) => setVolume(v / 100)}
               />
             </>
@@ -373,6 +397,7 @@ export function VolumeControl({
               step={1}
               className="min-w-0 flex-1 [&_[data-slot=slider-track]]:bg-black/15 dark:[&_[data-slot=slider-track]]:bg-white/20"
               aria-label="Volume"
+              disabled={advertisement}
               onValueChange={([v]) => setVolume(v / 100)}
             />
           )}
@@ -385,6 +410,7 @@ export function VolumeControl({
             <button
               type="button"
               onClick={toggleMute}
+              disabled={advertisement}
               aria-label={muted ? "Unmute" : "Mute"}
               className="flex size-7 shrink-0 items-center justify-center rounded-full text-black/55 hover:text-foreground dark:text-white/65"
             >
@@ -422,6 +448,7 @@ export function PlayerBar({
     shuffle,
     repeat,
     autoRadio,
+    advertisement,
   } = usePlaybackStore(
     useShallow((s) => ({
       playing: s.playing,
@@ -432,6 +459,7 @@ export function PlayerBar({
       shuffle: s.shuffle,
       repeat: s.repeat,
       autoRadio: s.autoRadio,
+      advertisement: s.advertisement,
     })),
   );
   const track = usePlaybackStore(currentTrack);
@@ -457,12 +485,10 @@ export function PlayerBar({
   });
 
   const hasTrack = !!track;
-  // Only treat "loading" as user-facing when the user has actually
-  // requested playback. The audio engine eagerly resolves the stream
-  // URL for the queued track on mount (so the first click on Play is
-  // instant), which flips status to "loading" even while playing is
-  // still false — without this guard, the freshly-launched player
-  // shows a spinner instead of the Play icon.
+  // Only treat "loading" as user-facing when the user has actually requested
+  // playback. A restored queue remains idle until Play instantiates the
+  // official page; this guard also keeps paused recovery transitions from
+  // replacing the Play icon with a spinner.
   const loading = status === "loading" && playing;
   const fullscreenControlsRef = useRef<HTMLDivElement>(null);
   const refreshFullscreenControlsGlass = useCallback(() => {
@@ -572,10 +598,7 @@ export function PlayerBar({
           in from blank. */}
         <AnimatePresence initial={false} mode="wait">
           {queueOpen ? (
-            <div
-              key="queue"
-              className="flex min-h-0 flex-1 flex-col"
-            >
+            <div key="queue" className="flex min-h-0 flex-1 flex-col">
               <QueueBody onClose={() => setQueueOpen(false)} />
             </div>
           ) : (
@@ -661,14 +684,22 @@ export function PlayerBar({
                 {/* Title + artist with heart on the right */}
                 <div className="flex items-start gap-2">
                   <div className="flex min-w-0 flex-1 flex-col">
-                    <span className="truncate text-base font-medium">
-                      {track?.title ?? "Nothing playing"}
-                    </span>
+                    <TrackTitleLink
+                      title={
+                        advertisement
+                          ? "Advertisement"
+                          : (track?.title ?? "Nothing playing")
+                      }
+                      albumId={track?.albumId}
+                      className="text-base font-medium"
+                      onNavigate={fullscreen ? onRequestClose : undefined}
+                    />
                     {track ? (
                       <ArtistLinks
                         artists={track.artists}
                         fallback={track.subtitle ?? ""}
                         className="truncate text-sm text-muted-foreground"
+                        onNavigate={fullscreen ? onRequestClose : undefined}
                       />
                     ) : (
                       <span className="truncate text-sm text-muted-foreground">
@@ -693,7 +724,7 @@ export function PlayerBar({
                     scrub={scrub}
                     setScrub={setScrub}
                     seek={seek}
-                    disabled={!hasTrack || duration <= 0}
+                    disabled={!hasTrack || duration <= 0 || advertisement}
                   />
                   <div className="flex justify-between text-xs tabular-nums text-muted-foreground">
                     <span>{formatTime(scrub ?? position)}</span>
@@ -718,7 +749,7 @@ export function PlayerBar({
                     size="icon"
                     aria-label="Previous"
                     onClick={prev}
-                    disabled={!hasTrack}
+                    disabled={!hasTrack || advertisement}
                   >
                     <SkipBackIcon className="fill-current" />
                   </Button>
@@ -726,7 +757,7 @@ export function PlayerBar({
                     size="icon"
                     aria-label={playing ? "Pause" : "Play"}
                     onClick={toggle}
-                    disabled={!hasTrack}
+                    disabled={!hasTrack || advertisement}
                     className="size-12 rounded-full bg-brand text-white hover:bg-brand/90"
                   >
                     {loading ? (
@@ -789,7 +820,9 @@ export function PlayerBar({
           `onGoToArtist` callback emits a Tauri nav event there
           instead of calling `useNavigate` (which would throw without
           a router). */}
-        {fullscreen ? createPortal(bottomActions, document.body) : bottomActions}
+        {fullscreen
+          ? createPortal(bottomActions, document.body)
+          : bottomActions}
       </aside>
     </TooltipProvider>
   );

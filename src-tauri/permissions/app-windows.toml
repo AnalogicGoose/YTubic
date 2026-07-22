@@ -1,0 +1,76 @@
+# The local main UI owns Goosic's application lifecycle and native services.
+# This intentionally excludes the registered compatibility-only
+# `get_cookie_header` and `refresh_active_session` commands because no local UI
+# calls them. Add a command here only when shipped frontend code needs it.
+[[set]]
+identifier = "main-window-commands"
+description = "Application commands required by the bundled Goosic main WebView."
+permissions = [
+  "allow-autostart-is-enabled",
+  "allow-autostart-set",
+  "allow-cache-cover",
+  "allow-cancel-offline-download",
+  "allow-clear-cookies",
+  "allow-clear-cover-cache",
+  "allow-close-player-window",
+  "allow-cover-cache-stats",
+  "allow-delete-cache-entries",
+  "allow-discord-clear",
+  "allow-discord-set-enabled",
+  "allow-discord-update",
+  "allow-ensure-ytdlp",
+  "allow-focus-main-window",
+  "allow-get-active-account-id",
+  "allow-get-auth-context",
+  "allow-get-cache-dir",
+  "allow-get-stream-base-url",
+  "allow-is-logged-in",
+  "allow-lastfm-begin-auth",
+  "allow-lastfm-flush",
+  "allow-lastfm-is-configured",
+  "allow-lastfm-love",
+  "allow-lastfm-poll-session",
+  "allow-lastfm-scrobble",
+  "allow-lastfm-update-now-playing",
+  "allow-lastfm-user-info",
+  "allow-list-accounts",
+  "allow-list-cache",
+  "allow-list-offline-downloads",
+  "allow-mark-offline-file-unplayable",
+  "allow-media-clear",
+  "allow-media-update",
+  "allow-merge-response-cookies",
+  "allow-notify-track",
+  "allow-open-player-window",
+  "allow-pick-cache-folder",
+  "allow-quit-app",
+  "allow-remove-account",
+  "allow-set-account-channel",
+  "allow-set-cache-dir",
+  "allow-set-close-behavior",
+  "allow-start-login",
+  "allow-start-offline-download",
+  "allow-switch-account",
+  "allow-update-account-meta",
+  "allow-web-player-control",
+  "allow-web-player-health",
+  "allow-web-player-load",
+  "allow-web-player-reset",
+]
+
+# The bundled floating UI is a separate, deliberately lower-privilege
+# JavaScript context. It mirrors transport state over Tauri events, performs
+# the player card's artwork/metadata actions, and can close or focus the main
+# window. It cannot control the native WebPlayer, accounts, downloads, cache
+# management, settings, process lifecycle, media integration, or Discord.
+[[set]]
+identifier = "floating-player-commands"
+description = "Minimal application commands required by the bundled floating-player WebView."
+permissions = [
+  "allow-cache-cover",
+  "allow-close-player-window",
+  "allow-focus-main-window",
+  "allow-get-auth-context",
+  "allow-lastfm-love",
+  "allow-merge-response-cookies",
+]

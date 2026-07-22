@@ -8,8 +8,8 @@
 use objc2::runtime::AnyClass;
 use objc2_app_kit::{
     NSAutoresizingMaskOptions, NSGlassEffectView, NSGlassEffectViewStyle,
-    NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
-    NSVisualEffectView, NSWindow,
+    NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
+    NSWindow,
 };
 use objc2_foundation::MainThreadMarker;
 

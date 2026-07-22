@@ -102,9 +102,19 @@ async function sha1Hex(text: string): Promise<string> {
  * pair fresh cookies with a stale channel (or vice versa) across a
  * sign-in or a channel switch.
  */
-type AuthContext = { cookie: string; pageId: string | null };
+export type AuthContext = {
+  cookie: string;
+  pageId: string | null;
+  accountId: string | null;
+  epoch: number;
+};
 
-const EMPTY_AUTH: AuthContext = { cookie: "", pageId: null };
+const EMPTY_AUTH: AuthContext = {
+  cookie: "",
+  pageId: null,
+  accountId: null,
+  epoch: 0,
+};
 
 // In-process cache for the auth context. Without it every browse / search
 // / next call invokes the Rust side, which hits disk + DPAPI-decrypts the
@@ -186,7 +196,10 @@ export function splitSetCookieHeader(raw: string): string[] {
  * Best-effort by design: a failed merge must never fail the data call
  * that triggered it.
  */
-export async function captureSetCookies(res: Response): Promise<void> {
+export async function captureSetCookies(
+  res: Response,
+  auth: AuthContext,
+): Promise<void> {
   const lines =
     typeof res.headers.getSetCookie === "function"
       ? res.headers.getSetCookie()
@@ -202,6 +215,8 @@ export async function captureSetCookies(res: Response): Promise<void> {
     const changed = await invoke<boolean>("merge_response_cookies", {
       host,
       setCookies: lines,
+      accountId: auth.accountId,
+      epoch: auth.epoch,
     });
     // A rotated value means the cached Cookie header is stale — drop
     // it so the next request sends what Google just issued.
@@ -219,8 +234,10 @@ export async function captureSetCookies(res: Response): Promise<void> {
  * account). Returns an empty object when the user has no cookies
  * imported; callers fall back to anonymous requests.
  */
-export async function authHeaders(): Promise<Record<string, string>> {
-  const { cookie, pageId } = await loadAuthContext();
+async function authHeadersFromContext({
+  cookie,
+  pageId,
+}: AuthContext): Promise<Record<string, string>> {
   if (!cookie) return {};
   const sapisid =
     cookie.match(/(?:^|;\s*)__Secure-3PAPISID=([^;]+)/)?.[1] ??
@@ -235,12 +252,17 @@ export async function authHeaders(): Promise<Record<string, string>> {
   return headers;
 }
 
+export async function authHeaders(): Promise<Record<string, string>> {
+  return authHeadersFromContext(await loadAuthContext());
+}
+
 export async function innertubePost(
   endpoint: string,
   body: Record<string, unknown>,
 ): Promise<YtNode> {
   const url = `https://music.youtube.com/youtubei/v1/${endpoint}?prettyPrint=false`;
-  const auth = await authHeaders();
+  const authContext = await loadAuthContext();
+  const auth = await authHeadersFromContext(authContext);
   const visitor = loadVisitorData();
   const visitorHeader: Record<string, string> = visitor
     ? { "X-Goog-Visitor-Id": visitor }
@@ -252,7 +274,7 @@ export async function innertubePost(
   });
 
   // Before the error bail: Google rotates cookies on 4xx responses too.
-  await captureSetCookies(res);
+  await captureSetCookies(res, authContext);
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");

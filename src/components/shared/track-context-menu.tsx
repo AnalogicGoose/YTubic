@@ -150,7 +150,12 @@ export function useTrackMenuController(item: ShelfItem) {
         const list = old ?? [];
         if (list.some((t) => t.id === item.id)) return list;
         return [
-          { id: item.id, kind: "song", title: item.title, thumbnails: item.thumbnails } as ShelfItem,
+          {
+            id: item.id,
+            kind: "song",
+            title: item.title,
+            thumbnails: item.thumbnails,
+          } as ShelfItem,
           ...list,
         ];
       });
@@ -257,6 +262,7 @@ export function TrackMenuItems({
   controller,
   primitives,
   onGoToArtist,
+  onGoToAlbum,
 }: {
   item: ShelfItem;
   context?: TrackContext;
@@ -269,6 +275,7 @@ export function TrackMenuItems({
    * forward to `useNavigate()`.
    */
   onGoToArtist?: (artistId: string) => void;
+  onGoToAlbum?: (albumId: string) => void;
 }) {
   const store = usePlaybackStore.getState;
   const { Item, Separator, Sub, SubTrigger, SubContent } = primitives;
@@ -285,7 +292,8 @@ export function TrackMenuItems({
   } = controller;
 
   const artist = item.artists?.find((a) => !!a.id);
-  const albumBrowseId = undefined;
+  const albumBrowseId = item.albumId;
+  const advertisement = usePlaybackStore((state) => state.advertisement);
   const removablePlaylistEntry =
     context?.playlistId && item.playlistSetVideoId
       ? {
@@ -297,6 +305,7 @@ export function TrackMenuItems({
   return (
     <>
       <Item
+        disabled={advertisement}
         onSelect={() => {
           if (context) store().playShelfItems(context.tracks, context.index);
           else store().playNow(item);
@@ -314,6 +323,7 @@ export function TrackMenuItems({
         Add to queue
       </Item>
       <Item
+        disabled={advertisement}
         onSelect={async () => {
           try {
             const radio = await fetchRadio(item.id);
@@ -354,7 +364,7 @@ export function TrackMenuItems({
           <ListMusicIcon />
           Add to playlist
         </SubTrigger>
-        <SubContent className="max-h-80 w-64 overflow-y-auto">
+        <SubContent className="track-playlist-menu w-64">
           {playlists.isFetching && !playlists.data ? (
             <div className="flex items-center gap-2 px-2 py-1.5 text-sm text-muted-foreground">
               <Loader2Icon className="size-3 animate-spin" />
@@ -409,16 +419,8 @@ export function TrackMenuItems({
           Go to artist
         </Item>
       )}
-      {albumBrowseId && (
-        <Item
-          onSelect={() => {
-            // Album navigation isn't wired yet — `albumBrowseId` is
-            // currently always undefined so this branch never runs.
-            // Left as a placeholder for when album browse IDs start
-            // flowing through.
-            void albumBrowseId;
-          }}
-        >
+      {albumBrowseId && onGoToAlbum && (
+        <Item onSelect={() => onGoToAlbum(albumBrowseId)}>
           <DiscAlbumIcon />
           Go to album
         </Item>
@@ -460,6 +462,7 @@ export function TrackContextMenu({ item, children, context }: Props) {
             onGoToArtist={(id) =>
               navigate({ to: "/artist/$id", params: { id } })
             }
+            onGoToAlbum={(id) => navigate({ to: "/album/$id", params: { id } })}
           />
         </ContextMenuContent>
       </ContextMenu>
@@ -519,6 +522,7 @@ export function TrackMoreMenu({
             onGoToArtist={(id) =>
               navigate({ to: "/artist/$id", params: { id } })
             }
+            onGoToAlbum={(id) => navigate({ to: "/album/$id", params: { id } })}
           />
         </DropdownMenuContent>
       </DropdownMenu>
@@ -575,9 +579,8 @@ export function NewPlaylistDialog({
         <DialogHeader>
           <DialogTitle>New playlist</DialogTitle>
           <DialogDescription>
-            The track will be added as the first entry. Playlists are
-            created as private — you can change that later on
-            music.youtube.com.
+            The track will be added as the first entry. Playlists are created as
+            private — you can change that later on music.youtube.com.
           </DialogDescription>
         </DialogHeader>
         <Input

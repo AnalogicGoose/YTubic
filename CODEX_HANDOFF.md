@@ -3,9 +3,9 @@
 > **Read this file first in every new Codex session.** It is the durable product,
 > engineering, UI, release, and troubleshooting context for this repository.
 >
-> Last verified: **2026-07-21**
+> Last verified: **2026-07-22**
 > Current app version: **0.4.7**
-> Current release candidate: **v0.4.7 playback/library reliability fixes**
+> Current release candidate: **v0.4.7 official WebPlayer and offline playlists**
 > Latest public release: <https://github.com/AnalogicGoose/Goosic/releases/tag/v0.4.6>
 
 ## 1. New-session quick start
@@ -57,11 +57,12 @@ published tags. New releases must always use a new version.
 
 ## 3. Product intent
 
-Goosic is a fast native-feeling YouTube Music desktop client for Windows. It is
-not a wrapper around the YouTube Music website: the React frontend talks to the
-InnerTube API, while the Tauri/Rust side handles Windows integration, account
-cookies, streaming infrastructure, caching, updater behavior, and native
-windows.
+Goosic is a fast native-feeling YouTube Music desktop client for Windows,
+macOS, and Linux. Its React interface talks to InnerTube for browsing and
+library data, while ordinary audio plays through one persistent, native
+YouTube Music WebPlayer. The Tauri/Rust side owns that isolated playback
+WebView, account profiles, explicit offline downloads, platform integration,
+updater behavior, and native windows.
 
 Core product values:
 
@@ -87,8 +88,11 @@ Current major capabilities:
 - Multiple YouTube account/channel support.
 - Google/YouTube sign-in on Windows WebView2 and macOS WKWebView, with
   platform-native browser identities and persistent per-account profiles.
-- Local stream proxy, managed yt-dlp, and managed Deno challenge runtime.
-- Premium-gated playback; account cookies are never passed to yt-dlp.
+- Official YouTube Music WebPlayer playback for guests, free accounts, and
+  Premium accounts, including YouTube's normal advertisements and restrictions.
+- Explicit Premium-only playlist downloads and validated local playback.
+- Managed yt-dlp, Deno, and PO-token infrastructure used only by those
+  explicit offline downloads; account cookies are never passed to yt-dlp.
 - Windows SMTC/media keys, tray, autostart, notifications, and single instance.
 - Last.fm scrobbling and optional love synchronization.
 - Discord Rich Presence.
@@ -110,7 +114,8 @@ Current major capabilities:
 | Client state     | Zustand, often persisted to localStorage               |
 | Motion           | Motion for React                                       |
 | Music data       | YouTube InnerTube via `youtubei.js` and custom parsers |
-| Audio URLs       | Managed yt-dlp + Deno + local Rust proxy               |
+| Online playback  | Persistent official YouTube Music WebPlayer            |
+| Offline audio    | Managed yt-dlp + Deno + cache-only local Rust proxy    |
 | Unit tests       | Vitest                                                 |
 | Package manager  | pnpm 10.33.1                                           |
 
@@ -126,13 +131,15 @@ React + TanStack Query + Zustand
   |              +-- cached feeds, search, library, entity data
   +-- routes, shelves, track lists, menus, player, lyrics
                  |
-                 | Tauri invoke/events
+                 | versioned native commands/events
                  v
 Rust/Tauri backend
-  |-- account cookie capture and refresh
-  |-- token-gated localhost stream proxy
-  |-- yt-dlp/Deno management and stream resolution
-  |-- cover/audio cache management
+  |-- persistent official YouTube Music playback WebView
+  |-- secret, generation-scoped loopback playback bridge
+  |-- account cookie capture, refresh, and per-account WebView profiles
+  |-- explicit Premium playlist downloads through managed yt-dlp/Deno/PO
+  |-- token-gated cache-only localhost audio proxy
+  |-- cover/offline-file management
   |-- tray, windows, autostart, notifications
   |-- Windows SMTC/media keys
   |-- Discord IPC worker
@@ -140,11 +147,23 @@ Rust/Tauri backend
   +-- updater/process plugins
 ```
 
-The same Vite bundle serves two native windows:
+The same Vite bundle serves two Goosic UI windows:
 
 - The main window uses TanStack Router and `AppShell`.
 - The floating player detects its window label and renders
   `FloatingPlayerApp` instead of the router.
+- A third native WebView, `youtube-player`, is an offscreen official YouTube
+  Music playback surface rather than a Goosic/Vite window. Keep it out of the
+  taskbar, Dock, Alt-Tab, normal window persistence, and Tauri capabilities.
+  Reuse it across tracks and recreate it when the account profile changes.
+  Windows maps it offscreen as a non-activating tool window; macOS maps an
+  alpha-zero NSWindow excluded from cycling/Mission Control; Linux maps an
+  alpha-zero GTK host, additionally positioning it offscreen on X11/XWayland.
+  Honor explicit `GDK_BACKEND=x11` even when `WAYLAND_DISPLAY` is present.
+- The current macOS deployment target is **macOS 14.0**. WKWebView's stable
+  per-account `WKWebsiteDataStore` identifier is only available there; lowering
+  this target would merge account playback cookies into a shared store and is
+  not permitted without a different isolation implementation.
 - On macOS, `src-tauri/src/native_glass.rs` wraps the floating player's Tauri
   content view in an AppKit-owned material host. macOS 26+ uses
   `NSGlassEffectView` with the WKWebView assigned as its official
@@ -153,9 +172,11 @@ The same Vite bundle serves two native windows:
   transparent. Do not restore CSS blur/ambient art on that native-backed
   surface or it will obscure Liquid Glass.
 
-The two windows are separate JavaScript contexts. Cross-window behavior uses
-Tauri events plus storage rehydration. Do not assume a Zustand mutation in one
-window automatically appears in the other.
+The two Goosic UI windows are separate JavaScript contexts. Cross-window
+behavior uses Tauri events plus storage rehydration. Do not assume a Zustand
+mutation in one window automatically appears in the other. The remote playback
+document is a separate trust domain and communicates only through its narrow
+native observer bridge.
 
 ## 6. Directory and file map
 
@@ -218,10 +239,14 @@ window automatically appears in the other.
 
 - `src/lib/innertube/` â€” InnerTube clients, parsers, entity queries, mutations,
   radio, and shared data types.
-- `src/lib/audio-engine.ts` â€” playback lifecycle, media state, Discord updates,
-  timing, and stream changes.
-- `src/lib/stream.ts` â€” local stream URL coordination and cache metadata.
-- `src/lib/ytdlp.ts` â€” managed yt-dlp/Deno lifecycle hooks and setup UI.
+- `src/lib/audio-engine.ts` â€” online WebPlayer/local-offline ownership,
+  playback lifecycle, media state, timing, and integration updates.
+- `src/lib/web-playback.ts` â€” typed frontend commands and events for the
+  native official WebPlayer.
+- `src/lib/stream.ts` â€” validated cache-only local audio URL coordination.
+- `src/lib/offline-library.ts` â€” offline-file validation and exact
+  downloaded-playlist queue construction.
+- `src/lib/ytdlp.ts` â€” passive managed-download setup/progress lifecycle.
 - `src/lib/query-client.ts` â€” query caching/persistence budgets.
 - `src/lib/store/playback.ts` â€” queue, history, repeat, shuffle, autoplay, and
   playback actions. The floating window uses a remote-control bridge.
@@ -236,6 +261,9 @@ window automatically appears in the other.
   The choice persists to the `visualTheme` field in `ytm-settings`; the shared
   glass blur setting applies across the player, menus, and sidebar.
 - `src/lib/store/track-source.ts` â€” song/video source pairing and selection.
+- `src/lib/store/offline-downloads.ts` â€” native offline-download state mirror.
+- `src/lib/store/playlist-downloads.ts` â€” sequential explicit playlist
+  download coordinator and persisted playlist manifests.
 - `src/lib/updater.ts` and `src/lib/store/update.ts` â€” update state machine.
 - `src/lib/lyrics/` â€” lyrics providers, matching, and LRC parsing.
 - `src/lib/lastfm.ts` and `lastfm-scrobbler.ts` â€” frontend Last.fm behavior.
@@ -251,7 +279,9 @@ window automatically appears in the other.
   love sync, and retry.
 - `src-tauri/src/ytdlp.rs` â€” managed yt-dlp binary and Deno runtime.
 - `src-tauri/src/pot_provider.rs` â€” pinned bgutil PO-token provider install,
-  loopback lifecycle, validation, health checks, and fallback coordination.
+  loopback lifecycle, validation, and health checks for explicit downloads.
+- `src-tauri/src/web_player.rs` â€” persistent cross-platform official playback
+  WebView, secure observer bridge, generation checks, and transport commands.
 - `src-tauri/src/appid.rs` â€” Windows AppUserModelID.
 - `src-tauri/build.rs` â€” Tauri build plus safe Last.fm credential injection.
 - `src-tauri/tauri.conf.json` â€” product/version, windows, CSP, bundle, updater.
@@ -259,43 +289,118 @@ window automatically appears in the other.
 
 ### Playback runtime contract
 
-- Browsing and search are available signed out. Playback is enabled only after
-  the signed-in account passes the YouTube Music/YouTube Premium check. The
-  gate and the extractor are deliberately separate: yt-dlp never receives the
-  account cookie jar, so private uploads still need a future narrowly scoped
-  authenticated streaming design.
-- Current yt-dlp releases require an external JavaScript runtime for full
-  YouTube signature/challenge support. Goosic downloads the official Deno
-  release archive beside yt-dlp on first run (roughly 50 MB), validates the
-  extracted executable, and installs it through a temporary file + atomic
-  replacement. Deno is MIT-licensed and comes from `denoland/deno` releases.
-- Deno refresh is best-effort and capped to once every 90 days. If GitHub or
-  the runtime download is unavailable, playback continues with yt-dlp's
-  `android_vr` client fallback. With Deno ready, `web_safari` is added for
-  formats that require JavaScript challenge solving.
-- Goosic manages upstream `bgutil-ytdlp-pot-provider` **v1.3.1** at runtime.
-  Both the plugin and source ZIP are pinned by SHA-256, installed atomically
-  under app data, and never updated to an unchecked latest release. Managed
-  Deno performs the frozen production dependency install and runs the server.
-- The audited provider entrypoint is patched to bind only `127.0.0.1`, starts
-  on a random port, and must answer `/ping` with the pinned version before
-  yt-dlp can use it. The active path disables ambient plugin directories,
-  points yt-dlp at a dedicated directory containing only the verified ZIP,
-  selects `mweb`, and passes the loopback provider URL. Provider setup is
-  exposed through the `ytdlp-state` `provider` phase.
-- Provider failure is nonfatal: Goosic retains the anonymous
-  `android_vr/web_safari` resolver, restarts a crashed provider on the one
-  existing playback retry, preserves the 429 cooldown, and never removes a
-  playable cache entry because provider setup is unavailable. Account cookies,
-  generated tokens, Visitor Data, request bodies, and account identifiers must
-  never be passed to yt-dlp or written to logs.
-- The local stream URL is preflighted with a one-byte Range request before it
-  reaches `HTMLAudioElement`. This lets resolver HTTP failures retain yt-dlp's
-  diagnostic instead of collapsing into "no supported source". The media
-  element and `play()` rejection paths are deduplicated per load generation.
-- Refresh redirects must use Axum's `OriginalUri`. `Router::nest` strips the
-  per-launch token from the handler URI; redirecting that rewritten path sends
-  the retry to an un-tokened 404.
+- Browsing, search, and ordinary playback are available signed out wherever
+  YouTube permits guest playback. Signed-in free accounts and Premium accounts
+  use the same official playback path. Premium is not a requirement for the
+  normal Play action.
+- Online playback is exclusively one persistent native YouTube Music WebPlayer:
+  WebView2 on Windows, WKWebView on macOS, and WebKitGTK on Linux. It loads the
+  official `music.youtube.com/watch` page in a guest profile or the active
+  account's persistent profile, so YouTube's advertisements, regional limits,
+  account restrictions, and entitlements remain intact.
+- The remote YouTube document has no Tauri capability. A versioned observer
+  reports playback through a secret per-launch loopback bridge. Native code
+  validates the trusted Origin, secret, payload size, generation, expected
+  video ID, strictly increasing per-generation sequence, and numeric values
+  before emitting readiness, position, duration, volume, buffering,
+  advertisement, ended, or error state to React. Never log playback URLs,
+  bridge secrets, cookies, tokens, or remote request bodies.
+- Commands and events are generation-scoped so a stale page cannot control the
+  active track. On a genuine startup failure, Goosic recreates the WebPlayer
+  once and retries that track once. A second failure is surfaced to the user;
+  ordinary playback never falls back to yt-dlp or a local extractor.
+- The playback observer suppresses YouTube Music's `beforeunload` confirmation
+  handler at document start. The hidden transport WebView has no user-editable
+  form state to preserve, and allowing that handler would expose a browser
+  "Leave site?" dialog whenever Goosic navigates it to the next track.
+- Goosic's persisted volume/mute state remains authoritative across WebPlayer
+  navigations. YouTube assigns its own persisted level (usually `1.0`) to a
+  replacement media element the instant it is created, which is earlier than
+  any observer sample, `volumechange` listener, or native eval can react —
+  that gap was audible as a short full-volume burst on track transitions.
+  The observer therefore installs a ceiling on `HTMLMediaElement.prototype`'s
+  `volume` accessor at document start and normalizes the element inside a
+  wrapped `play()`. The page may still go quieter (WebKit's silent-autoplay
+  probing needs that) but can never exceed the requested level, advertisements
+  included. Observer samples still pin the exact value; mute remains untouched
+  during advertisements. Do not move this enforcement back into the sampling
+  loop alone — it is deferred behind a microtask and the in-flight bridge
+  fetch, which is precisely the window that was audible.
+- The official page runs its own autoplay queue inside the transport document.
+  Once it moves past the requested track, that is the requested track's
+  completion, not a wrong-track load: the observer reports an ordinary
+  terminal event and pauses the page's own pick so it never becomes audible,
+  and the native bridge suppresses the unexpected-track error while a terminal
+  is pending. Reading that transition as a failure previously tore down and
+  reloaded the WebPlayer on the same queue row instead of advancing. The
+  advertisement gates matter here: the DOM ad marker can clear one sample
+  before the player reports requested content again, so `lastObservedAd` and
+  the ad-suppression flag must keep advertisements out of that path.
+- Seeking goes through the official player's `seekTo`, never a raw
+  `media.currentTime` assignment. The page owns the media source: assigning
+  `currentTime` moves only the element, so a target outside the buffered range
+  collapses back to whatever is already buffered, and the page's own clock —
+  the one driving its progress UI and its next segment requests — keeps
+  pointing somewhere else. The element assignment survives only as a fallback
+  for a document that never exposes a player API. React additionally holds the
+  requested position until an observer sample confirms it, because samples
+  already in flight still carry the pre-seek time and would drag the progress
+  bar backwards; that hold is bounded so a refused seek cannot freeze the bar.
+- Never resume a finished element. Reaching the end fires `pause` before
+  `ended`, and `play()` on a finished element rewinds it to zero, so both the
+  observer's resume helper and React's ready-state reconciliation used to
+  restart the very track Goosic was about to advance past. The observer
+  reports `finished` from the moment the requested track is over — including
+  the samples before its one-shot `ended` event — and both sides honor it.
+- Each replay also receives a new generation. Native terminal delivery is
+  exactly once per generation, preventing duplicate bridge samples from
+  advancing two rows without breaking repeat-one or replaying an ended row.
+- Advertisements are detected only to keep the Goosic UI honest. Do not skip,
+  mute, seek through, or otherwise bypass them. Show an Advertisement state and
+  temporarily disable controls that the official page cannot safely support.
+- Offline acquisition is a separate, explicit Premium feature on playlist
+  pages. Goosic drains the requested playlist, downloads it sequentially, and
+  exposes aggregate progress, cancellation, and retry. There is no per-track
+  download action, automatic playback-time prefetch, or implicit caching from
+  normal Play. A 429/not-a-bot result stops the batch rather than retrying it
+  aggressively; its 15-minute cooldown is persisted natively and applies to
+  every start path across app restarts.
+- Download authority is action-scoped and fail-closed. Starting or retrying a
+  playlist forces a fresh live Premium probe; a running batch revalidates at a
+  bounded cadence and stops on account/channel changes or loss of live
+  entitlement. Offline grace permits existing downloaded-file playback only
+  and never authorizes new network downloads. Terminal batch states detach
+  those boundary listeners before async cache invalidation, so a late account
+  event cannot leave the UI permanently stuck on Cancelling.
+- yt-dlp, managed Deno, and the pinned `bgutil-ytdlp-pot-provider` **v1.3.1**
+  exist only for explicit playlist downloads. They are installed lazily when
+  that feature is used, never receive account cookies, and never influence
+  online playback. Every child ignores user/system yt-dlp configuration and
+  global plugins; only the verified managed provider ZIP is enabled when
+  healthy. Provider archives remain SHA-256 pinned, atomic, loopback-only,
+  version-checked, and never updated to an unchecked latest release. If the
+  provider crashes during a track, Goosic restarts/rechecks it once and retries
+  that affected track once; a 429 is never included in that retry path.
+- Premium account-menu detection follows YouTube Music's authenticated menu
+  shape: Free accounts contain a branded Premium upsell, while Premium
+  accounts omit it (or expose an explicit manage-membership entry). Transport
+  failures and anonymous menus remain unentitled. While a live probe is still
+  pending, the sidebar says `Checking` instead of incorrectly labeling the
+  account `Free`.
+- **Play downloaded** resolves only an exact, validated local file selected
+  from a downloaded-playlist manifest or explicitly from Storage, then serves
+  it through the token-gated, cache-only loopback route to `HTMLAudioElement`.
+  It never turns a local miss into a network extraction. Downloaded-file
+  playback remains Premium-only.
+- Existing downloads survive migration. Legacy and invalid entries stay
+  visible in Storage (invalid files are marked as needing repair), are excluded
+  from playback, and are never silently deleted. Removal remains an explicit
+  user action.
+- New offline media defaults to the durable app-data
+  `offline-media/stream` directory, not the evictable OS cache directory. On
+  first startup after migration, finalized files from the old cache location
+  are copied without overwriting or deleting either copy. Cover art remains in
+  the OS cache because it is disposable.
 
 ## 7. Approved visual language
 
@@ -352,7 +457,10 @@ the content/album background remains visible beneath it.
 - Main content and shelves use the custom thin app scrollbar, not the default
   Windows scrollbar.
 - Menu tracks use top/bottom margins so the thumb does not intersect rounded
-  corners.
+  corners. Dropdown/context-menu portals keep 8px viewport collision padding;
+  scrollable submenus cap their height to both 20rem and Radix's available
+  viewport height. The menu clip extends 1px beyond the shell so it does not
+  shear the directional glass rim.
 - Horizontal shelves should retain visible previous/next arrows and mouse/PC
   scrolling behavior.
 - Lyrics intentionally hide their native scrollbar.
@@ -373,6 +481,10 @@ the content/album background remains visible beneath it.
   The first native Liquid Glass pass intentionally applies only to the
   standalone macOS floating-player window; the in-main-window right and bottom
   variants remain web glass until they are extracted into native surfaces.
+- Playback queue entries preserve album browse IDs and artist browse IDs.
+  Clicking now-playing title metadata opens its album, while artist metadata
+  opens the artist page. The standalone floating player forwards both routes
+  to the main window through `nav:album` and `nav:artist` events.
 - Volume controls/popovers must not create a visually conflicting second glass
   material. `VolumeControl` intentionally keeps the original compact pill
   silhouette: a vertical pill above the bottom-player button and a horizontal
@@ -521,13 +633,14 @@ remain flat so controls nested inside a glass surface do not create glass on
 glass. Menus, popovers, dialogs, sidebar, and players reuse these primitives;
 do not rebuild their material stack locally.
 
-Windows WebView2 gets the complete interactive renderer by default:
+Interactive materials select the renderer by platform:
 
-- `useLiquidRefractionClass()` adds `liquid-refract` to `<html>` only when
-  `isWindowsWebview()`. There is no separate experiment preference. WebKit
-  ignores SVG URLs in `backdrop-filter`, so macOS keeps the CSS fallback in the
-  main WebView while the standalone player uses native AppKit Liquid Glass on
-  macOS 26+.
+- `useGlassPlatformClasses()` adds `liquid-refract` on Windows and
+  `macos-backdrop-glass` on macOS. There is no separate experiment preference.
+  WebView2 receives the complete SVG renderer. Because WKWebView ignores SVG
+  URLs in `backdrop-filter`, macOS interactive surfaces instead use native CSS
+  backdrop blur driven by the same 6px/16px frost tokens. Static surfaces stay
+  unblurred on every platform.
 - `src/components/layout/liquid-glass-defs.tsx` registers only
   `.glass-material-interactive` elements. Its dimension-matched SVG filters
   implement the Figma preset (70% refraction, 30 depth, 25% intensity, -60Â°
@@ -549,8 +662,10 @@ Windows WebView2 gets the complete interactive renderer by default:
 - The main SVG host is mounted once in AppShell. On Windows the standalone
   floating-player WebView mounts its own host and an internal album-derived
   backdrop, allowing the interactive SVG material to refract WebView pixels
-  without exposing the desktop through the transparent window. macOS continues
-  to use native `NSGlassEffectView`/`NSVisualEffectView`; Linux stays static.
+  without exposing the desktop through the transparent window. The standalone
+  macOS player continues to use native `NSGlassEffectView`/`NSVisualEffectView`
+  and is explicitly excluded from the CSS blur to prevent double compositing;
+  Linux stays static.
 - CSS selectors are rooted at `.glass-material-interactive` and
   `.glass-material-static`. Never broaden the SVG selector to `.liquid-glass`,
   or static surfaces will incorrectly acquire the interactive effects.
@@ -862,9 +977,8 @@ Minimum visual matrix:
 
 These were present and non-blocking at the `v0.3.6` release:
 
-- ESLint reports **8 warnings and 0 errors**:
+- ESLint reports **6 warnings and 0 errors**:
   - one unused assignment warning in `animated-tabs.tsx`;
-  - two missing error causes in `innertube/player.ts`;
   - hook dependency warnings in Library and Playlist routes.
 - Vite warns that the main bundle is over 500 kB.
 - Vite warns that `innertube/album.ts` is both statically and dynamically
@@ -903,7 +1017,8 @@ Important examples:
 `useSettingsStore` defaults include:
 
 - close button hides to tray;
-- cache auto-clean off;
+- offline media changes only through explicit playlist downloads or Storage
+  removal actions;
 - ambient background;
 - dynamic album mesh on;
 - playback notifications off;
@@ -919,15 +1034,38 @@ persisted and synchronized across native windows.
   generated account data.
 - The Discord client ID and updater public key are public identifiers, not
   secrets.
-- The Rust stream server nests routes under a random per-launch 128-bit token.
-  Preserve that token gate.
-- Account cookies are handled by native code and refreshed periodically.
+- The Rust stream server nests routes under a random per-launch 256-bit token.
+  Preserve that token gate. Its audio route is cache-only and must never become
+  a general online extractor again.
+- The official playback page runs in a native WebView profile. Google/YouTube
+  receive the same page, account, playback, and advertising data that their
+  own web player normally receives. Goosic does not suppress advertisements or
+  account restrictions.
+- The remote playback document receives no Tauri IPC capability. Its loopback
+  observer bridge is per-launch secret, Origin-checked, size-limited, and
+  generation/sequence-scoped; bridge secrets and playback URLs must not be
+  logged.
+- `src-tauri/build.rs` registers every custom command in Tauri's application
+  manifest and fails the build on invoke/ACL drift. Only the bundled `main` and
+  `player` labels receive local capabilities; the remote playback, login, and
+  session-keeper documents receive none.
+- Account cookies are handled by native code, stored in per-account profiles,
+  and refreshed periodically. They are never passed to yt-dlp, Deno, or the
+  PO-token provider used for explicit playlist downloads.
+- Existing and legacy offline files are not silently removed during migration.
+  Storage surfaces invalid files for repair or explicit deletion.
 - The CSP in `tauri.conf.json` explicitly allows the image/media/network hosts
   needed by the app. Add domains narrowly rather than disabling CSP.
 - Rich Presence and notification behavior should remain user-controlled.
 
 ## 18. Recent release history
 
+- **Unreleased `v0.4.7`** â€” moves ordinary playback to an official persistent
+  YouTube Music WebPlayer on Windows, macOS, and Linux, opening playback to
+  guests and free accounts while preserving advertisements and restrictions.
+  Offline audio becomes an explicit Premium-only playlist download with
+  validated local playback; automatic prefetch and per-track downloads are
+  removed, and existing files are preserved.
 - `v0.4.6` â€” adds the shared configurable glass material to the sidebar,
   prevents native image/link dragging, bounds WebView2 refraction memory, and
   lowers the hidden authenticated session keeper's Windows memory target.
@@ -960,20 +1098,25 @@ persisted and synchronized across native windows.
 
 At the time this document was last refreshed:
 
-- The unreleased working tree hardens playback against current YouTube
-  challenges with managed Deno and the pinned managed bgutil PO-token provider
-  v1.3.1. The provider is checksum-verified, installed atomically, bound only
-  to loopback, health/version checked, and automatically falls back to the
-  existing anonymous clients without sharing account cookies. Playback also
-  preserves resolver diagnostics through a
-  one-byte preflight, validates cached containers, and fixes token-preserving
-  refresh retries. yt-dlp work is serialized, next-track prefetch waits ten
-  seconds, DRM-only TV client extraction is excluded, and HTTP 429/DRM
-  failures bypass the harmful immediate retry. It also drains library
-  continuations fail-closed for cache
-  cleanup, scopes playlist parsing away from suggestions, supports exact
-  per-entry playlist removal, validates lyrics provider metadata, and repairs
-  the collapsed-sidebar Library hit target. The app version remains `0.4.7`
+- The unreleased working tree makes the official persistent YouTube Music
+  WebPlayer the sole online playback backend on Windows, macOS, and Linux.
+  Guests, free accounts, and Premium accounts use YouTube's own page, including
+  its advertisements and restrictions. A native generation-scoped loopback
+  observer drives the existing Goosic queue/player UI without exposing Tauri
+  IPC to the remote document. A genuine load failure receives one WebPlayer
+  recreation/retry; there is deliberately no yt-dlp playback fallback.
+- yt-dlp, managed Deno, and the checksum-pinned bgutil PO-token provider v1.3.1
+  are retained only for explicit Premium playlist downloads. Playlist batches
+  run sequentially with aggregate progress, cancellation, retry, account and
+  freshly revalidated entitlement boundaries, one provider-crash recovery,
+  hermetic yt-dlp config/plugin isolation, and a durable 429 cooldown. Normal
+  playback no longer prefetches or creates local files, and the track context
+  menu has no individual download action.
+- **Play downloaded** uses only exact, validated files from a persisted playlist
+  manifest or an explicit Storage selection through the cache-only local proxy.
+  Existing downloads remain intact and visible; invalid/legacy entries are
+  marked for repair or explicit
+  deletion instead of being silently removed. The app version remains `0.4.7`
   until an explicit release is prepared.
 - `v0.4.6` is public with Windows, Linux, and universal macOS artifacts. It
   adds shared sidebar glass, Default/Modern bottom-player layouts, global glass

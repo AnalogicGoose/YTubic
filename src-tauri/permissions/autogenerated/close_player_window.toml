@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-close-player-window"
+description = "Enables the close_player_window command without any pre-configured scope."
+commands.allow = ["close_player_window"]
+
+[[permission]]
+identifier = "deny-close-player-window"
+description = "Denies the close_player_window command without any pre-configured scope."
+commands.deny = ["close_player_window"]

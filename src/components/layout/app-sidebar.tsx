@@ -475,7 +475,8 @@ function UserProfile() {
     undefined;
   const initial = (name || email || "?").trim().charAt(0).toUpperCase();
   const isPremium = premiumStatus === "premium";
-  const tierLabel = isPremium ? "Premium" : "Free";
+  const tierLabel =
+    premiumStatus === null ? "Checking" : isPremium ? "Premium" : "Free";
 
   const signOut = async () => {
     if (!activeAccount) {

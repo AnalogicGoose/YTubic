@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-lastfm-is-configured"
+description = "Enables the lastfm_is_configured command without any pre-configured scope."
+commands.allow = ["lastfm_is_configured"]
+
+[[permission]]
+identifier = "deny-lastfm-is-configured"
+description = "Denies the lastfm_is_configured command without any pre-configured scope."
+commands.deny = ["lastfm_is_configured"]

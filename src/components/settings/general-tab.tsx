@@ -93,8 +93,8 @@ function AccountGroup() {
             Not signed in
           </span>
           <span className="text-[13px] text-muted-foreground">
-            Sign in to unlock your library, liked songs, and Premium-quality
-            streams. Cookies stay on this machine.
+            Sign in to unlock your library, liked songs, and Premium offline
+            downloads. Cookies stay on this machine.
           </span>
         </div>
         <Button size="sm" onClick={signIn} disabled={signingIn}>

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-lastfm-scrobble"
+description = "Enables the lastfm_scrobble command without any pre-configured scope."
+commands.allow = ["lastfm_scrobble"]
+
+[[permission]]
+identifier = "deny-lastfm-scrobble"
+description = "Denies the lastfm_scrobble command without any pre-configured scope."
+commands.deny = ["lastfm_scrobble"]

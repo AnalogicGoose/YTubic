@@ -9,8 +9,8 @@ import {
  * A library can span hundreds of cards, but YouTube Music normally returns
  * only the first ~25 in the initial browse response. Keep a generous bound so
  * a malformed/repeating cursor cannot spin forever. Hitting the bound rejects
- * instead of returning a partial library: cache auto-clean relies on this data
- * being complete before it decides which files are safe to delete.
+ * instead of returning a partial library: Storage uses this data to label and
+ * preview manual bulk deletion, so incompleteness must be explicit.
  */
 const MAX_CONTINUATION_PAGES = 200;
 
@@ -184,7 +184,7 @@ export async function fetchAllLibraryBrowseSections(
     pageCount += 1;
 
     // Deliberately let network/auth failures reject. Returning what we have
-    // would make downstream cache cleanup treat page-two tracks as disposable.
+    // would make the Storage tab's manual cleanup preview incomplete.
     const page = parseContinuationPage(await rawBrowseContinuation(cursor));
     if (!page.recognized) {
       throw new Error(`Unrecognized library continuation for ${browseId}`);

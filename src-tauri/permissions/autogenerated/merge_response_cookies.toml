@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-merge-response-cookies"
+description = "Enables the merge_response_cookies command without any pre-configured scope."
+commands.allow = ["merge_response_cookies"]
+
+[[permission]]
+identifier = "deny-merge-response-cookies"
+description = "Denies the merge_response_cookies command without any pre-configured scope."
+commands.deny = ["merge_response_cookies"]

@@ -348,11 +348,23 @@ export function fetchPlaylistContinuation(
 
 type PlaylistContinuationLoader = (token: string) => Promise<PlaylistNextPage>;
 
+type PlaylistCollectionOptions = {
+  signal?: AbortSignal;
+};
+
+function throwIfPlaylistLoadAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  const error = new Error("Playlist loading cancelled.");
+  error.name = "AbortError";
+  throw error;
+}
+
 /** Walk all continuation pages, optionally rejecting any partial result. */
 export async function collectFullPlaylistTracks(
   first: PlaylistFirstPage,
   loadContinuation: PlaylistContinuationLoader,
   strict: boolean,
+  options: PlaylistCollectionOptions = {},
 ): Promise<ShelfItem[]> {
   const tracks = [...first.tracks];
   const seenEntries = new Set(tracks.map(playlistEntryKey));
@@ -360,6 +372,7 @@ export async function collectFullPlaylistTracks(
   let token = first.continuationToken;
 
   for (let i = 0; token; i++) {
+    throwIfPlaylistLoadAborted(options.signal);
     if (seenTokens.has(token)) {
       if (strict) throw new Error("Repeated playlist continuation token");
       break;
@@ -373,7 +386,9 @@ export async function collectFullPlaylistTracks(
     let page: PlaylistNextPage;
     try {
       page = await loadContinuation(token);
+      throwIfPlaylistLoadAborted(options.signal);
     } catch (e) {
+      if (e instanceof Error && e.name === "AbortError") throw e;
       if (strict) throw e;
       if (import.meta.env.DEV) {
         console.debug("[playlist] continuation failed:", e);
@@ -396,14 +411,18 @@ export async function collectFullPlaylistTracks(
 async function fetchPlaylistFully(
   id: string,
   strict: boolean,
+  options: PlaylistCollectionOptions = {},
 ): Promise<PlaylistPage> {
+  throwIfPlaylistLoadAborted(options.signal);
   const first = await fetchPlaylistFirstPage(id);
+  throwIfPlaylistLoadAborted(options.signal);
   const tracks = await collectFullPlaylistTracks(
     first,
     strict
       ? (token) => loadPlaylistContinuation(token, true)
       : fetchPlaylistContinuation,
     strict,
+    options,
   );
   if (import.meta.env.DEV) {
     console.debug("[playlist] full-load parsed:", id, "tracks=", tracks.length);
@@ -423,10 +442,14 @@ export function fetchPlaylist(id: string): Promise<PlaylistPage> {
 }
 
 /**
- * Full-load variant for cache protection and other fail-closed callers. Any
+ * Full-load variant for offline downloads and other fail-closed callers. Any
  * continuation failure, repeated cursor, or safety-limit hit rejects instead
- * of exposing a truncated playlist as complete.
+ * of exposing a truncated playlist as complete. Cancellation stops before the
+ * next continuation is requested (an in-flight request is allowed to settle).
  */
-export function fetchPlaylistStrict(id: string): Promise<PlaylistPage> {
-  return fetchPlaylistFully(id, true);
+export function fetchPlaylistStrict(
+  id: string,
+  options: PlaylistCollectionOptions = {},
+): Promise<PlaylistPage> {
+  return fetchPlaylistFully(id, true, options);
 }

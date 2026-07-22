@@ -1,40 +1,31 @@
 import { invoke } from "@tauri-apps/api/core";
-import { isPremium } from "@/lib/store/premium";
-import type { QueueTrack } from "@/lib/store/playback";
 
 /**
- * The Rust side runs a tiny axum server on a random localhost port. It
- * downloads and validates yt-dlp output, then Range-serves the completed
- * audio file. We query the port once and build stream URLs from it.
- *
- * Non-Premium / signed-out users append `?ephemeral=1` to every stream
- * URL. The Rust handler reads that as "write to a session-only cache directory
- * that gets wiped on every app startup." The audio engine currently gates
- * playback before this point; retaining the flag keeps the storage boundary
- * safe for diagnostic or future callers.
+ * The native loopback server Range-serves finalized offline files. Normal
+ * online playback never calls this module and therefore cannot trigger
+ * yt-dlp; downloads are started only through the explicit playlist action.
  */
 
 let baseUrlPromise: Promise<string> | null = null;
 
 async function fetchBaseUrl(): Promise<string> {
-  // Up to ~2s of retries — the server starts asynchronously from Tauri
-  // setup() and may not be listening yet when the first track plays.
-  for (let i = 0; i < 20; i++) {
+  // The loopback server starts asynchronously during Tauri setup.
+  for (let attempt = 0; attempt < 20; attempt += 1) {
     try {
       return await invoke<string>("get_stream_base_url");
-    } catch (e) {
-      if (i === 19) throw e;
-      await new Promise((r) => setTimeout(r, 100));
+    } catch (error) {
+      if (attempt === 19) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 100));
     }
   }
-  throw new Error("unreachable");
+  throw new Error("offline audio server did not start");
 }
 
 export function getStreamBaseUrl(): Promise<string> {
   if (!baseUrlPromise) {
-    baseUrlPromise = fetchBaseUrl().catch((e) => {
-      baseUrlPromise = null; // retry next call
-      throw e;
+    baseUrlPromise = fetchBaseUrl().catch((error) => {
+      baseUrlPromise = null;
+      throw error;
     });
   }
   return baseUrlPromise;
@@ -50,19 +41,25 @@ export class StreamPreparationError extends Error {
   }
 }
 
-async function prepareLocalStream(url: string): Promise<void> {
+/**
+ * Only HTTP 422 proves that bytes exist but failed native container/repair
+ * validation. A missing file, loopback startup race, or network failure must
+ * never poison an otherwise recoverable download with an `.invalid` marker.
+ */
+export function isDefinitiveOfflineFileFailure(error: unknown): boolean {
+  return error instanceof StreamPreparationError && error.status === 422;
+}
+
+async function prepareOfflineStream(url: string): Promise<void> {
   let response: Response;
   try {
-    // A one-byte Range request makes the Rust side finish/validate the file
-    // before HTMLAudio sees it. HTTP failures can then retain yt-dlp's useful
-    // diagnostic instead of collapsing into MEDIA_ERR_SRC_NOT_SUPPORTED.
     response = await fetch(url, {
       headers: { Range: "bytes=0-0" },
       cache: "no-store",
     });
   } catch (error) {
     throw new StreamPreparationError(
-      `Audio stream server unavailable: ${
+      `Offline audio server unavailable: ${
         error instanceof Error ? error.message : String(error)
       }`,
     );
@@ -70,7 +67,7 @@ async function prepareLocalStream(url: string): Promise<void> {
   if (!response.ok) {
     const detail = (await response.text().catch(() => "")).trim();
     throw new StreamPreparationError(
-      `Audio resolver failed (HTTP ${response.status})${
+      `Offline file unavailable (HTTP ${response.status})${
         detail ? `: ${detail.slice(0, 600)}` : ""
       }`,
       response.status,
@@ -79,94 +76,10 @@ async function prepareLocalStream(url: string): Promise<void> {
   await response.body?.cancel().catch(() => {});
 }
 
-export async function streamUrlFor(
-  videoId: string,
-  options?: { refresh?: boolean },
-): Promise<string> {
+/** Return a URL that can only serve an already-finalized local file. */
+export async function offlineStreamUrlFor(videoId: string): Promise<string> {
   const base = await getStreamBaseUrl();
-  const params = new URLSearchParams();
-  if (!isPremium()) params.set("ephemeral", "1");
-  const canonicalQuery = params.size ? `?${params}` : "";
-  const canonical = `${base}/stream/${encodeURIComponent(videoId)}${canonicalQuery}`;
-  if (options?.refresh) params.set("refresh", "1");
-  const prepareQuery = params.size ? `?${params}` : "";
-  await prepareLocalStream(
-    `${base}/stream/${encodeURIComponent(videoId)}${prepareQuery}`,
-  );
-  // A refresh is one-shot. Return the canonical URL so HTMLAudio's later
-  // Range requests cannot evict the file that the preflight just repaired.
-  return canonical;
-}
-
-const prefetched = new Set<string>();
-
-/**
- * Warm the disk cache for a videoId in the background. No-ops if we
- * already fired a prefetch for this id in this session, or if the user
- * isn't on Premium — pre-warming a session-only cache doesn't help once
- * the user advances past the prefetched track (the next app launch
- * wipes it anyway).
- *
- * The server itself is idempotent on a per-file basis (checks .part /
- * .webm existence), so re-firing is cheap but still skippable.
- */
-export async function prefetchStream(videoId: string): Promise<void> {
-  if (!isPremium()) return;
-  if (prefetched.has(videoId)) return;
-  prefetched.add(videoId);
-  try {
-    const base = await getStreamBaseUrl();
-    // Fire-and-forget — server returns 200/202 immediately and caches
-    // bytes in the background. fetch() only rejects on network errors, so an
-    // HTTP 4xx/5xx (yt-dlp spawn/extractor failure) resolves normally — drop
-    // the warm mark on an error status so the id is retried later.
-    const res = await fetch(`${base}/prefetch/${encodeURIComponent(videoId)}`);
-    if (!res.ok) prefetched.delete(videoId);
-  } catch {
-    // If it fails we'll just fall through to on-demand fetch later.
-    prefetched.delete(videoId);
-  }
-}
-
-const metaWritten = new Set<string>();
-
-/**
- * Persist a cached track's display metadata (title + artist) to a
- * sidecar next to its `.webm`, so the Storage tab can show a real name
- * for the track without waiting on — or being limited to — the library
- * walk. Only meaningful for the persistent (Premium) cache; ephemeral
- * streams are wiped on launch, so there's nothing on disk to label.
- *
- * `videoId` is the STREAM id (the file that actually lands on disk),
- * which may differ from the queue's display id when the user has toggled
- * a track to its music-video version. The title/artist still describe
- * the track and are correct either way. Fire-and-forget and deduped per
- * session; a failed write is retried on the next play/prefetch.
- */
-export async function saveTrackMeta(
-  videoId: string,
-  track: Pick<QueueTrack, "title" | "subtitle" | "artists"> | undefined,
-): Promise<void> {
-  if (!isPremium()) return;
-  if (!track?.title) return;
-  if (metaWritten.has(videoId)) return;
-  metaWritten.add(videoId);
-  const artist =
-    track.artists?.map((a) => a.name).join(", ") || track.subtitle || null;
-  try {
-    await invoke("set_cache_meta", { videoId, title: track.title, artist });
-  } catch {
-    metaWritten.delete(videoId);
-  }
-}
-
-/**
- * Drop the in-memory "already prefetched" / "already labelled" logs.
- * Call after the disk cache is cleared or the account switches —
- * otherwise we'd never re-prefetch tracks that are gone from disk but
- * still remembered as "warm", nor re-write their metadata sidecars.
- */
-export function clearPrefetchMemo(): void {
-  prefetched.clear();
-  metaWritten.clear();
+  const url = `${base}/stream/${encodeURIComponent(videoId)}?cache_only=1`;
+  await prepareOfflineStream(url);
+  return url;
 }

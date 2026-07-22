@@ -99,6 +99,7 @@ export function TrackList({
   const active = usePlaybackStore(currentTrack);
   const playing = usePlaybackStore((s) => s.playing);
   const sourcePrefs = useTrackSourceStore((s) => s.byVideoId);
+  const activeIsOnline = (active?.playbackMode ?? "online") === "online";
 
   // Resolve the app's scroll container (`<main class="app-scroll">`) so
   // the virtualizer can listen to its scroll events. Done in an effect
@@ -232,7 +233,7 @@ export function TrackList({
                 showAlbum={showAlbum}
                 showPlays={showPlays}
                 playlistId={playlistId}
-                isActive={active?.videoId === t.id}
+                isActive={activeIsOnline && active?.videoId === t.id}
                 playing={playing}
                 videoSourceSelected={sourcePrefs[t.id]?.selected === "video"}
               />

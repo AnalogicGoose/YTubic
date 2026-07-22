@@ -17,20 +17,38 @@ export function usePlaybackNotifications(): void {
   const enabled = useSettingsStore((s) => s.playbackNotifications);
   const track = usePlaybackStore(currentTrack);
   const videoId = track?.videoId ?? null;
-  const lastSeenRef = useRef<string | null>(null);
+  const index = usePlaybackStore((s) => s.index);
+  const loadRevision = usePlaybackStore((s) => s.loadRevision);
+  const playing = usePlaybackStore((s) => s.playing);
+  const status = usePlaybackStore((s) => s.status);
+  const advertisement = usePlaybackStore((s) => s.advertisement);
+  const selectionKey = videoId ? `${index}:${videoId}:${loadRevision}` : null;
+  const selectedRef = useRef<string | null>(null);
+  const handledRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (videoId === null) {
+    if (selectionKey === null) {
       // Queue cleared / nothing playing — reset so the next track
       // (even a replay of the same id) notifies again.
-      lastSeenRef.current = null;
+      selectedRef.current = null;
+      handledRef.current = null;
       return;
     }
-    const prev = lastSeenRef.current;
-    // Track the id even while the setting is off: flipping the toggle
-    // mid-song shouldn't retroactively toast the current track.
-    lastSeenRef.current = videoId;
-    if (!enabled || prev === videoId) return;
+    if (selectedRef.current !== selectionKey) {
+      selectedRef.current = selectionKey;
+      handledRef.current = enabled ? null : selectionKey;
+    }
+    // Treat a disabled selection as already handled: flipping the toggle
+    // mid-song shouldn't retroactively toast it.
+    if (!enabled) {
+      handledRef.current = selectionKey;
+      return;
+    }
+    // A queued song is not yet "now playing" while YouTube is presenting an
+    // advertisement or while its requested document is still buffering.
+    if (!playing || status !== "ready" || advertisement) return;
+    if (handledRef.current === selectionKey) return;
+    handledRef.current = selectionKey;
 
     const artists =
       track?.artists?.map((a) => a.name).join(", ") || track?.subtitle || "";
@@ -40,5 +58,5 @@ export function usePlaybackNotifications(): void {
     }).catch(() => {
       /* best-effort: plain-vite dev or toast backend failure */
     });
-  }, [videoId, enabled, track]);
+  }, [selectionKey, enabled, playing, status, advertisement, track]);
 }

@@ -19,12 +19,12 @@ const KOFI_URL = "https://ko-fi.com/nuberr";
 const CREDITS: { name: string; role: string; url: string }[] = [
   {
     name: "yt-dlp",
-    role: "audio streaming",
+    role: "offline playlist downloads",
     url: "https://github.com/yt-dlp/yt-dlp",
   },
   {
     name: "Deno",
-    role: "YouTube challenge runtime (MIT)",
+    role: "offline download challenge runtime (MIT)",
     url: "https://github.com/denoland/deno",
   },
   { name: "LRCLIB", role: "synced lyrics", url: "https://lrclib.net" },

@@ -32,11 +32,8 @@ import {
 } from "@/components/shared/track-context-menu";
 import { findAlternateVideoId } from "@/lib/innertube/alternate-source";
 import { isFloatingPlayerWindow } from "@/lib/floating-player";
-import {
-  useTrackSourceStore,
-  type SourceKind,
-} from "@/lib/store/track-source";
-import type { QueueTrack } from "@/lib/store/playback";
+import { useTrackSourceStore, type SourceKind } from "@/lib/store/track-source";
+import { usePlaybackStore, type QueueTrack } from "@/lib/store/playback";
 import type { ShelfItem } from "@/lib/innertube/types";
 
 type Props = {
@@ -79,9 +76,8 @@ function PlayerMoreMenuMain(props: Props) {
   return (
     <PlayerMoreMenuInner
       {...props}
-      onGoToArtist={(id) =>
-        navigate({ to: "/artist/$id", params: { id } })
-      }
+      onGoToArtist={(id) => navigate({ to: "/artist/$id", params: { id } })}
+      onGoToAlbum={(id) => navigate({ to: "/album/$id", params: { id } })}
     />
   );
 }
@@ -94,6 +90,12 @@ function PlayerMoreMenuFloating(props: Props) {
         void emit("nav:artist", { id });
         // Bring the main window to the front so the user actually
         // sees the page they just navigated to.
+        void invoke("focus_main_window").catch(() => {
+          /* command might not be registered in older builds */
+        });
+      }}
+      onGoToAlbum={(id) => {
+        void emit("nav:album", { id });
         void invoke("focus_main_window").catch(() => {
           /* command might not be registered in older builds */
         });
@@ -114,7 +116,11 @@ function PlayerMoreMenuInner({
   align = "end",
   side = "top",
   onGoToArtist,
-}: Props & { onGoToArtist: (artistId: string) => void }) {
+  onGoToAlbum,
+}: Props & {
+  onGoToArtist: (artistId: string) => void;
+  onGoToAlbum: (albumId: string) => void;
+}) {
   const item: ShelfItem = track
     ? {
         kind: "song",
@@ -123,6 +129,7 @@ function PlayerMoreMenuInner({
         thumbnails: track.thumbnails,
         artists: track.artists,
         album: track.album,
+        albumId: track.albumId,
         duration: track.duration,
       }
     : { kind: "song", id: "", title: "", thumbnails: [] };
@@ -162,6 +169,7 @@ function PlayerMoreMenuInner({
                 controller={controller}
                 primitives={dropPrimitives}
                 onGoToArtist={onGoToArtist}
+                onGoToAlbum={onGoToAlbum}
               />
             </>
           ) : null}
@@ -185,6 +193,8 @@ function PlayerMoreMenuInner({
  * `findAlternateVideoId` lookup — the menu form is just less wide.
  */
 function SourceMenuItems({ track }: { track: QueueTrack }) {
+  const advertisement = usePlaybackStore((s) => s.advertisement);
+  const offline = track.playbackMode === "offline";
   const record = useTrackSourceStore((s) => s.byVideoId[track.videoId]);
   const setSelected = useTrackSourceStore((s) => s.setSelected);
   const setAlternate = useTrackSourceStore((s) => s.setAlternate);
@@ -192,9 +202,10 @@ function SourceMenuItems({ track }: { track: QueueTrack }) {
   const selected: SourceKind = record?.selected ?? "song";
 
   const switchTo = async (target: SourceKind) => {
-    if (busy || target === selected) return;
+    if (advertisement || offline || busy || target === selected) return;
     const cachedAlt = target === "video" ? record?.video : record?.song;
     if (cachedAlt) {
+      if (usePlaybackStore.getState().advertisement) return;
       setSelected(track.videoId, target);
       return;
     }
@@ -211,6 +222,7 @@ function SourceMenuItems({ track }: { track: QueueTrack }) {
         );
         return;
       }
+      if (usePlaybackStore.getState().advertisement) return;
       setAlternate(track.videoId, target, altId);
       setSelected(track.videoId, target);
     } catch (e) {
@@ -227,7 +239,7 @@ function SourceMenuItems({ track }: { track: QueueTrack }) {
           e.preventDefault();
           void switchTo("song");
         }}
-        disabled={busy !== null}
+        disabled={advertisement || offline || busy !== null}
       >
         {busy === "song" ? (
           <Loader2Icon className="size-4 animate-spin" />
@@ -242,7 +254,7 @@ function SourceMenuItems({ track }: { track: QueueTrack }) {
           e.preventDefault();
           void switchTo("video");
         }}
-        disabled={busy !== null}
+        disabled={advertisement || offline || busy !== null}
       >
         {busy === "video" ? (
           <Loader2Icon className="size-4 animate-spin" />

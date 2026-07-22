@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-web-player-health"
+description = "Enables the web_player_health command without any pre-configured scope."
+commands.allow = ["web_player_health"]
+
+[[permission]]
+identifier = "deny-web-player-health"
+description = "Denies the web_player_health command without any pre-configured scope."
+commands.deny = ["web_player_health"]

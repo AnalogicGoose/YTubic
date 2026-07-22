@@ -6,7 +6,6 @@ import { listen } from "@tauri-apps/api/event";
 import { resetInnertube } from "@/lib/innertube/client";
 import { fetchAccountInfo } from "@/lib/innertube/account";
 import { fetchChannelList } from "@/lib/innertube/channels";
-import { clearPrefetchMemo } from "@/lib/stream";
 import { openChannelPicker } from "@/lib/store/channel-picker";
 import { usePlaybackStore } from "@/lib/store/playback";
 import { usePinnedPlaylistsStore } from "@/lib/store/pinned-playlists";
@@ -23,6 +22,7 @@ export type AccountSummary = {
   pageId: string | null;
   channelName: string | null;
   channelPhotoUrl: string | null;
+  webPlayerIdentityVerified: boolean | null;
   isActive: boolean;
 };
 
@@ -45,9 +45,9 @@ export function useAccounts() {
 /**
  * Mount once at the app root. Wires the Rust `accounts-changed`
  * event into a full context reset: stops the player, clears the
- * per-account Zustand stores, drops the prefetch memo, wipes the
- * TanStack Query cache, and resets the InnerTube client so the next
- * outbound request uses the freshly-active jar.
+ * per-account Zustand stores, wipes the TanStack Query cache, and resets
+ * the InnerTube client so the next outbound request uses the freshly-active
+ * jar. Rust independently recreates the isolated WebPlayer profile.
  *
  * Rust only emits `accounts-changed` when the *active* account id
  * actually changes (login, switch, logout, dedup-induced flip). Meta
@@ -134,17 +134,16 @@ export function useAccountsChangedListener(): void {
       // 2. Stop audio so the previous account's track doesn't keep
       //    playing while everything else churns. `clearQueue` sets
       //    index = -1 which strips the audio element's src.
-      usePlaybackStore.getState().clearQueue();
+      usePlaybackStore.getState().clearQueue(true);
 
       // 3. Other per-account local state: typed search history,
       //    per-track Song↔Video preferences, cached Premium status.
       useSearchHistory.getState().clear();
       useTrackSourceStore.setState({ byVideoId: {} });
-      usePremiumStore.setState({ status: null });
+      usePremiumStore.setState({ status: null, source: null, verifiedAt: 0 });
 
       // 4. In-memory caches that wrap network state.
       resetInnertube();
-      clearPrefetchMemo();
 
       // 5. Query cache. `resetQueries` puts every query back to its
       //    initial empty state and refetches the ones with mounted

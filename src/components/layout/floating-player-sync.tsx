@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { emit, listen } from "@tauri-apps/api/event";
+import { emit, emitTo, listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow, Window } from "@tauri-apps/api/window";
 import { usePlaybackStore } from "@/lib/store/playback";
@@ -36,7 +36,10 @@ type TransportSnapshot = Pick<
   PlaybackState,
   | "status"
   | "error"
-  | "streamUrl"
+  | "backend"
+  | "webviewReady"
+  | "advertisement"
+  | "backendError"
   | "playing"
   | "volume"
   | "muted"
@@ -56,7 +59,10 @@ function buildTransportSnapshot(s: PlaybackState): TransportSnapshot {
   return {
     status: s.status,
     error: s.error,
-    streamUrl: s.streamUrl,
+    backend: s.backend,
+    webviewReady: s.webviewReady,
+    advertisement: s.advertisement,
+    backendError: s.backendError,
     playing: s.playing,
     volume: s.volume,
     muted: s.muted,
@@ -89,7 +95,10 @@ function transportChanged(prev: PlaybackState, curr: PlaybackState): boolean {
   return (
     prev.status !== curr.status ||
     prev.error !== curr.error ||
-    prev.streamUrl !== curr.streamUrl ||
+    prev.backend !== curr.backend ||
+    prev.webviewReady !== curr.webviewReady ||
+    prev.advertisement !== curr.advertisement ||
+    prev.backendError !== curr.backendError ||
     prev.playing !== curr.playing ||
     prev.volume !== curr.volume ||
     prev.muted !== curr.muted ||
@@ -130,21 +139,31 @@ export function FloatingPlayerSync() {
   useEffect(() => {
     const unsubP = usePlaybackStore.subscribe((curr, prev) => {
       if (transportChanged(prev, curr)) {
-        void emit("playback:transport", buildTransportSnapshot(curr));
+        void emitTo(
+          "player",
+          "playback:transport",
+          buildTransportSnapshot(curr),
+        );
       }
       if (queueChanged(prev, curr)) {
-        void emit("playback:queue", buildQueueSnapshot(curr));
+        void emitTo("player", "playback:queue", buildQueueSnapshot(curr));
       }
     });
     const unsubT = useTrackSourceStore.subscribe((s) => {
-      void emit("track-source:state", { byVideoId: s.byVideoId });
+      void emitTo("player", "track-source:state", {
+        byVideoId: s.byVideoId,
+      });
     });
     // Initial broadcast — covers the case where the floating window
     // already exists when this sender mounts.
     const initial = usePlaybackStore.getState();
-    void emit("playback:transport", buildTransportSnapshot(initial));
-    void emit("playback:queue", buildQueueSnapshot(initial));
-    void emit("track-source:state", {
+    void emitTo(
+      "player",
+      "playback:transport",
+      buildTransportSnapshot(initial),
+    );
+    void emitTo("player", "playback:queue", buildQueueSnapshot(initial));
+    void emitTo("player", "track-source:state", {
       byVideoId: useTrackSourceStore.getState().byVideoId,
     });
     return () => {
@@ -248,6 +267,9 @@ export function FloatingPlayerSync() {
     register(
       listen<TrackSourceAction>("track-source:action", (e) => {
         const a = e.payload;
+        // The floating mirror can be a frame behind. The authoritative main
+        // store is the final ad-compliance boundary for every source mutation.
+        if (usePlaybackStore.getState().advertisement) return;
         const store = useTrackSourceStore.getState();
         switch (a.type) {
           case "setSelected":
@@ -263,9 +285,9 @@ export function FloatingPlayerSync() {
     register(
       listen("playback:request-snapshot", () => {
         const s = usePlaybackStore.getState();
-        void emit("playback:transport", buildTransportSnapshot(s));
-        void emit("playback:queue", buildQueueSnapshot(s));
-        void emit("track-source:state", {
+        void emitTo("player", "playback:transport", buildTransportSnapshot(s));
+        void emitTo("player", "playback:queue", buildQueueSnapshot(s));
+        void emitTo("player", "track-source:state", {
           byVideoId: useTrackSourceStore.getState().byVideoId,
         });
       }),

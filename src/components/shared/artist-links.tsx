@@ -13,6 +13,8 @@ type Props = {
   className?: string;
   /** Per-link className — applied to the `<a>` (or button in floating). */
   linkClassName?: string;
+  /** Runs before cross-page navigation, e.g. to close full-screen player. */
+  onNavigate?: () => void;
 };
 
 /**
@@ -32,6 +34,7 @@ export function ArtistLinks({
   fallback,
   className,
   linkClassName,
+  onNavigate,
 }: Props) {
   if (!artists || artists.length === 0) {
     return fallback ? <span className={className}>{fallback}</span> : null;
@@ -42,7 +45,12 @@ export function ArtistLinks({
         <Fragment key={`${a.id ?? a.name}-${i}`}>
           {i > 0 ? ", " : ""}
           {a.id ? (
-            <ArtistLink id={a.id} name={a.name} className={linkClassName} />
+            <ArtistLink
+              id={a.id}
+              name={a.name}
+              className={linkClassName}
+              onNavigate={onNavigate}
+            />
           ) : (
             a.name
           )}
@@ -56,10 +64,12 @@ function ArtistLink({
   id,
   name,
   className,
+  onNavigate,
 }: {
   id: string;
   name: string;
   className?: string;
+  onNavigate?: () => void;
 }) {
   const cls = cn(
     "cursor-pointer transition-colors hover:text-foreground hover:underline",
@@ -72,6 +82,7 @@ function ArtistLink({
         type="button"
         className={cls}
         onClick={() => {
+          onNavigate?.();
           void emit("nav:artist", { id });
           // Best-effort: pull the main window to the front so the
           // user actually sees the page they just opened.
@@ -86,8 +97,65 @@ function ArtistLink({
   }
 
   return (
-    <Link to="/artist/$id" params={{ id }} className={cls}>
+    <Link
+      to="/artist/$id"
+      params={{ id }}
+      className={cls}
+      onClick={onNavigate}
+    >
       {name}
+    </Link>
+  );
+}
+
+/**
+ * Apple Music-style now-playing title link. A song title opens its album when
+ * the browse id is available; older persisted tracks without one remain plain
+ * text. Floating-player clicks are forwarded to the main router via Tauri.
+ */
+export function TrackTitleLink({
+  title,
+  albumId,
+  className,
+  onNavigate,
+}: {
+  title: string;
+  albumId?: string;
+  className?: string;
+  onNavigate?: () => void;
+}) {
+  if (!albumId) return <span className={className}>{title}</span>;
+
+  const cls = cn(
+    "cursor-pointer truncate text-left transition-colors hover:text-foreground hover:underline",
+    className,
+  );
+  if (isFloatingPlayerWindow()) {
+    return (
+      <button
+        type="button"
+        className={cls}
+        onClick={() => {
+          onNavigate?.();
+          void emit("nav:album", { id: albumId });
+          void invoke("focus_main_window").catch(() => {
+            /* command might not be registered in older builds */
+          });
+        }}
+      >
+        {title}
+      </button>
+    );
+  }
+
+  return (
+    <Link
+      to="/album/$id"
+      params={{ id: albumId }}
+      className={cls}
+      onClick={onNavigate}
+    >
+      {title}
     </Link>
   );
 }

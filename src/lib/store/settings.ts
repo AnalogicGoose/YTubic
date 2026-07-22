@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import { isWindowsWebview } from "@/lib/platform";
+import { isMacOSWebview, isWindowsWebview } from "@/lib/platform";
 import {
   clampGlassBlur,
   GLASS_BLUR_DEFAULT,
@@ -11,17 +11,11 @@ import {
 } from "@/lib/themes";
 
 export type CloseButtonAction = "tray" | "quit";
-export type CacheAutoCleanPeriod = "off" | "daily" | "weekly" | "monthly";
 export type BackgroundMode = "ambient" | "plain";
 
 type State = {
   /** What the title-bar ✕ does: hide to tray (default) or quit. */
   closeAction: CloseButtonAction;
-  /** Cadence of the background sweep that deletes cached tracks not
-   *  in the user's library (see `lib/cache-cleanup.ts`). */
-  cacheAutoClean: CacheAutoCleanPeriod;
-  /** Unix ms of the last completed sweep. 0 = never ran. */
-  lastCacheCleanAt: number;
   /** Window backdrop: "ambient" tints with blurred album art,
    *  "plain" keeps the flat theme background. */
   background: BackgroundMode;
@@ -60,8 +54,6 @@ type State = {
    *  likes intentionally different per platform. See `lib/lastfm.ts`. */
   lastfmLoveSync: boolean;
   setCloseAction: (v: CloseButtonAction) => void;
-  setCacheAutoClean: (v: CacheAutoCleanPeriod) => void;
-  markCacheCleaned: () => void;
   setBackground: (v: BackgroundMode) => void;
   setVisualTheme: (v: VisualThemeId) => void;
   setGlassBlur: (v: number) => void;
@@ -87,8 +79,6 @@ export const useSettingsStore = create<State>()(
   persist(
     (set) => ({
       closeAction: "tray",
-      cacheAutoClean: "off",
-      lastCacheCleanAt: 0,
       background: "ambient",
       visualTheme: "default",
       glassBlur: GLASS_BLUR_DEFAULT,
@@ -101,8 +91,6 @@ export const useSettingsStore = create<State>()(
       lastfmAvatar: null,
       lastfmLoveSync: false,
       setCloseAction: (closeAction) => set({ closeAction }),
-      setCacheAutoClean: (cacheAutoClean) => set({ cacheAutoClean }),
-      markCacheCleaned: () => set({ lastCacheCleanAt: Date.now() }),
       setBackground: (background) => set({ background }),
       setVisualTheme: (visualTheme) => set({ visualTheme }),
       setGlassBlur: (v) => set({ glassBlur: clampGlassBlur(v) }),
@@ -127,7 +115,7 @@ export const useSettingsStore = create<State>()(
     }),
     {
       name: "ytm-settings",
-      version: 1,
+      version: 2,
       // Frost opacity used to be persisted as `glassOpacity`. Remove that
       // retired preference during hydration so existing installs do not keep
       // carrying an invisible legacy value.
@@ -138,6 +126,8 @@ export const useSettingsStore = create<State>()(
 
         const migrated = { ...(persisted as Record<string, unknown>) };
         delete migrated.glassOpacity;
+        delete migrated.cacheAutoClean;
+        delete migrated.lastCacheCleanAt;
         return migrated as unknown as State;
       },
       // Old installs may have no visualTheme yet — or a since-retired id
@@ -149,6 +139,8 @@ export const useSettingsStore = create<State>()(
           ...((persisted ?? {}) as Record<string, unknown>),
         };
         delete persistedSettings.glassOpacity;
+        delete persistedSettings.cacheAutoClean;
+        delete persistedSettings.lastCacheCleanAt;
         const saved = persistedSettings as Partial<State>;
         const value = saved?.visualTheme;
         const savedBlur = saved?.glassBlur;
@@ -198,19 +190,22 @@ export function useCloseBehaviorSync(): void {
 }
 
 /**
- * Add the `liquid-refract` class to <html> on Windows. The class upgrades
- * every explicit `.glass-material-interactive` surface to true backdrop
- * refraction via the SVG lens filter (see `LiquidGlassDefs` and index.css).
- * Static glass remains a separate Shadow -> Fill implementation.
- * Windows-only: Chromium renders SVG filters in `backdrop-filter`; WebKit
- * ignores the `url()` term, so macOS/Linux never get the class. Mounted in
- * both AppShell and FloatingPlayerApp — separate JS contexts, same rule.
+ * Select the platform optical renderer for interactive glass. Windows gets
+ * the dimension-matched SVG refraction filter; macOS gets WKWebView's native
+ * backdrop blur using the same small/medium frost tokens. Static glass stays
+ * a separate no-blur construction, and Linux retains its opaque fallback.
+ * Mounted in both AppShell and FloatingPlayerApp because they use separate
+ * document contexts.
  */
-export function useLiquidRefractionClass(): void {
+export function useGlassPlatformClasses(): void {
   useEffect(() => {
     document.documentElement.classList.toggle(
       "liquid-refract",
       isWindowsWebview(),
+    );
+    document.documentElement.classList.toggle(
+      "macos-backdrop-glass",
+      isMacOSWebview(),
     );
   }, []);
 }

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-delete-cache-entries"
+description = "Enables the delete_cache_entries command without any pre-configured scope."
+commands.allow = ["delete_cache_entries"]
+
+[[permission]]
+identifier = "deny-delete-cache-entries"
+description = "Denies the delete_cache_entries command without any pre-configured scope."
+commands.deny = ["delete_cache_entries"]

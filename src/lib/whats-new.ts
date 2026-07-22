@@ -38,6 +38,28 @@ export type WhatsNewEntry = {
  */
 export const WHATS_NEW: WhatsNewEntry[] = [
   {
+    version: "0.4.7",
+    date: "July 2026",
+    sections: [
+      {
+        heading: "Playback for everyone",
+        items: [
+          "Ordinary playback now uses YouTube Music's official player on Windows, macOS, and Linux.",
+          "Guests and free accounts can listen wherever YouTube permits it, with normal advertisements and account restrictions intact.",
+          "A failed player gets one clean restart instead of silently switching to a downloader.",
+        ],
+      },
+      {
+        heading: "Offline playlists",
+        items: [
+          "Premium users can explicitly download a complete playlist with progress, cancellation, and retry.",
+          "Play downloaded uses only validated local files and never starts a hidden network download.",
+          "Automatic prefetch and individual track downloads are gone, while legacy downloads stay visible through migration and are never silently deleted.",
+        ],
+      },
+    ],
+  },
+  {
     version: "0.3.4",
     date: "July 2026",
     image: "/whats-new/0.3.0.svg",
@@ -135,7 +157,7 @@ export const WHATS_NEW: WhatsNewEntry[] = [
       {
         heading: "Storage settings",
         items: [
-          "The Storage tab now shows real song titles for every cached track, plus when the next auto-clean is due.",
+          "The Storage tab now shows real song titles and storage sizes for downloaded tracks.",
         ],
       },
       {

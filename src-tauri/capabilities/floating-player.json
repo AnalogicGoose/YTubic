@@ -1,0 +1,33 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "floating-player",
+  "description": "Least-privilege local capability for Goosic's bundled floating-player UI",
+  "local": true,
+  "windows": ["player"],
+  "permissions": [
+    "floating-player-commands",
+    "core:event:default",
+    "core:window:allow-get-all-windows",
+    "core:window:allow-is-visible",
+    "core:window:allow-outer-position",
+    "core:window:allow-outer-size",
+    "core:window:allow-scale-factor",
+    "core:window:allow-set-always-on-top",
+    "core:window:allow-start-dragging",
+    {
+      "identifier": "http:default",
+      "allow": [
+        { "url": "https://music.youtube.com/*" },
+        { "url": "https://www.youtube.com/*" },
+        { "url": "https://www.google.com/*" },
+        { "url": "https://i.ytimg.com/*" },
+        { "url": "https://yt3.ggpht.com/*" },
+        { "url": "https://yt3.googleusercontent.com/*" },
+        { "url": "https://lh3.googleusercontent.com/*" },
+        { "url": "https://itunes.apple.com/*" },
+        { "url": "https://apic-desktop.musixmatch.com/*" },
+        { "url": "https://genius.com/*" }
+      ]
+    }
+  ]
+}

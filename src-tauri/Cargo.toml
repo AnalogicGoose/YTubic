@@ -84,6 +84,7 @@ zip = { version = "4.6", default-features = false, features = ["deflate-flate2"]
 # Verifies the pinned PO-provider plugin/source archives before executing any
 # downloaded code. See `src/pot_provider.rs`.
 sha2 = "0.10"
+getrandom = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38"
@@ -98,6 +99,10 @@ windows-sys = { version = "0.59", features = [
 ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# The hidden official player must be mapped on native Wayland or WebKitGTK can
+# suspend an unrealized surface. Direct GTK access lets us map an alpha-zero,
+# input-ignoring host while X11/XWayland continues to use an offscreen window.
+gtk = "0.18"
 # Linux equivalent of Windows DPAPI in src/secure_store.rs: a random AES key
 # lives in the OS keyring (secret-service — GNOME Keyring / KWallet — with a
 # kernel-keyutils fallback), and the cookie blob itself is AES-256-GCM

@@ -2,6 +2,14 @@
 
 Date: 2026-07-05. Based on an audit of the current code (auth, stream-server, premium-gate, top-bar).
 
+> **Historical document:** This records the original release audit and is not
+> the current playback contract. The unreleased `v0.4.7` architecture replaces
+> anonymous yt-dlp streaming, playback-time prefetch, and Premium-gated normal
+> Play with a persistent official YouTube Music WebPlayer on Windows, macOS,
+> and Linux. yt-dlp/Deno/PO tooling is now reserved for explicit Premium
+> playlist downloads. See `CODEX_HANDOFF.md` and `README.md` for the current
+> behavior and privacy boundary.
+
 ---
 
 ## Answers to the key questions

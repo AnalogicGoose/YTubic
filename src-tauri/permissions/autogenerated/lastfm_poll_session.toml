@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-lastfm-poll-session"
+description = "Enables the lastfm_poll_session command without any pre-configured scope."
+commands.allow = ["lastfm_poll_session"]
+
+[[permission]]
+identifier = "deny-lastfm-poll-session"
+description = "Denies the lastfm_poll_session command without any pre-configured scope."
+commands.deny = ["lastfm_poll_session"]

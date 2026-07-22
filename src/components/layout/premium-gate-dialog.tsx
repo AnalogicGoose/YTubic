@@ -17,12 +17,11 @@ import { usePremiumGateDialog } from "@/lib/store/premium-gate";
 import { usePremiumStore } from "@/lib/store/premium";
 
 const PREMIUM_URL = "https://music.youtube.com/music_premium";
-const YTM_URL = "https://music.youtube.com";
 
 /**
- * Shown when a signed-out / Free user tries to start playback (the
- * audio engine calls `openPremiumGate()` instead of resolving a
- * stream). Content tracks the account state reactively: a "checking"
+ * Shown when a signed-out / Free user requests an offline download.
+ * Ordinary playback uses YouTube's official ad-supported WebView and is not
+ * gated. Content tracks the account state reactively: a "checking"
  * placeholder while the Premium probe is still in flight, then the
  * sign-in or upgrade message. It closes itself the moment Premium is
  * confirmed (e.g. right after signing in), so a paying user who
@@ -58,15 +57,15 @@ export function PremiumGateDialog() {
         <DialogHeader>
           <DialogTitle>
             {signedOut
-              ? "Sign in to play music"
-              : "YouTube Music Premium required"}
+              ? "Sign in to download music"
+              : "Premium required for offline music"}
           </DialogTitle>
           <DialogDescription>
             {checking
               ? "Checking your YouTube Music subscription…"
               : signedOut
-                ? "Goosic plays music through your YouTube Music account. Sign in with an account that has an active Music Premium subscription."
-                : "Your account doesn't have an active Music Premium subscription, which YouTube requires for ad-free playback."}
+                ? "Sign in with an account that has an active YouTube Music Premium subscription to save music offline."
+                : "Your account can keep listening with YouTube's normal ads, but offline downloads require YouTube Music Premium."}
           </DialogDescription>
         </DialogHeader>
 
@@ -75,9 +74,8 @@ export function PremiumGateDialog() {
             <div className="flex gap-3 rounded-lg border border-border/60 bg-surface p-3">
               <InfoIcon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
               <p className="text-xs leading-relaxed text-muted-foreground">
-                Free YouTube Music is supported by ads. YouTube's Terms of
-                Service require those ads to play, and Goosic has no way to show
-                them, so YouTube limits ad-free playback to Premium accounts.{" "}
+                Free YouTube Music playback remains available through the
+                official player with its normal advertisements.{" "}
                 <span className="font-medium text-foreground">
                   Goosic itself stays completely free and open source, and
                   always will be.
@@ -86,9 +84,6 @@ export function PremiumGateDialog() {
               </p>
             </div>
             <div className="flex justify-end gap-2">
-              <Button variant="outline" onClick={() => void openUrl(YTM_URL)}>
-                Listen in browser
-              </Button>
               {signedOut ? (
                 <Button
                   onClick={() => {

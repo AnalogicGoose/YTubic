@@ -86,7 +86,7 @@ pub fn managed_deno_path(managed_ytdlp: &Path) -> PathBuf {
 
 /// Official Deno release archive for the current target. Goosic's published
 /// targets are covered explicitly; an unusual development architecture simply
-/// runs yt-dlp without the managed runtime instead of failing playback.
+/// runs explicit downloads without the managed runtime when possible.
 fn deno_download_url() -> Option<&'static str> {
     #[cfg(all(windows, target_arch = "x86_64"))]
     {
@@ -140,20 +140,25 @@ fn youtube_player_clients(has_js_runtime: bool) -> &'static str {
     }
 }
 
-/// Arguments shared by every yt-dlp invocation. Keeping player selection in
-/// one place prevents the metadata resolver and the streaming downloader from
-/// silently using different challenge capabilities.
+/// Arguments shared by every explicit offline-download invocation. Keeping
+/// player selection here prevents setup and download paths from silently using
+/// different challenge capabilities.
 pub fn youtube_runtime_args(
     managed_ytdlp: &Path,
     provider: Option<(&Path, &str)>,
 ) -> Vec<OsString> {
     let deno = managed_deno_path(managed_ytdlp);
     let has_deno = deno.is_file();
-    let mut args = Vec::new();
+    // Goosic's explicit downloader must be hermetic in both provider and
+    // fallback modes. A user's yt-dlp config or globally installed plugin can
+    // otherwise add cookies, change clients, or load unverified code.
+    let mut args = vec![
+        OsString::from("--ignore-config"),
+        OsString::from("--no-plugin-dirs"),
+    ];
     if let Some((plugin_dir, base_url)) = provider {
         // Load only the pinned, checksum-verified package. User/global yt-dlp
-        // plugin directories are intentionally excluded from Goosic playback.
-        args.push(OsString::from("--no-plugin-dirs"));
+        // plugin directories are intentionally excluded from Goosic downloads.
         args.push(OsString::from("--plugin-dirs"));
         args.push(plugin_dir.as_os_str().to_owned());
         args.push(OsString::from("--extractor-args"));
@@ -175,29 +180,15 @@ pub fn youtube_runtime_args(
     args
 }
 
-/// Program to spawn: the managed copy when present, otherwise bare
-/// `yt-dlp` so PATH still works on dev machines. Resolved at every
-/// spawn (not cached) so a download finishing mid-session takes effect
-/// on the next track without a restart.
-pub fn program(managed: &Path) -> PathBuf {
-    if managed.exists() {
-        managed.to_path_buf()
-    } else {
-        PathBuf::from("yt-dlp")
-    }
-}
-
-fn emit_state(app: &tauri::AppHandle, phase: &str, message: Option<String>) {
+pub(crate) fn emit_state(app: &tauri::AppHandle, phase: &str, message: Option<String>) {
     let _ = app.emit(
         "ytdlp-state",
         serde_json::json!({ "phase": phase, "message": message }),
     );
 }
 
-/// Idempotent "make yt-dlp available" entry point. Called from the
-/// frontend on every launch (so the webview's event listener is
-/// guaranteed to be mounted before any state event fires) and safe to
-/// re-invoke as a retry after a failed download.
+/// Idempotent "make yt-dlp available" entry point. Called only for an
+/// explicit offline download and safe to re-invoke as a user retry.
 ///
 /// Emits `ytdlp-state` events: `downloading` / `runtime` → `ready` | `error`.
 pub async fn ensure(app: tauri::AppHandle) {
@@ -211,9 +202,9 @@ pub async fn ensure(app: tauri::AppHandle) {
         Ok(program) => {
             // Current yt-dlp needs an external runtime for full YouTube
             // challenge support. Advertise this distinct phase so first-run
-            // setup is not mistaken for a hung audio request. The stream path
-            // joins the same lock; if the official runtime download fails it
-            // continues with the android_vr fallback instead.
+            // setup is not mistaken for a hung download. The playlist worker
+            // joins the same lock and can use a limited fallback client if the
+            // optional runtime installation fails.
             if program == managed {
                 maybe_self_update(&managed).await;
             }
@@ -242,14 +233,16 @@ pub async fn ensure(app: tauri::AppHandle) {
                     );
                 }
                 if let Err(error) = crate::pot_provider::ensure(&app, &managed, true).await {
-                    eprintln!("[pot-provider] setup failed; fallback remains available: {error}");
+                    eprintln!(
+                        "[pot-provider] setup failed; download fallback remains available: {error}"
+                    );
                     ready_message = Some(format!(
-                        "PO-token provider unavailable; using fallback playback clients: {error}"
+                        "PO-token provider unavailable; using fallback download clients: {error}"
                     ));
                 }
             } else {
                 ready_message = Some(
-                    "YouTube challenge runtime unavailable; using fallback playback clients".into(),
+                    "YouTube challenge runtime unavailable; using fallback download clients".into(),
                 );
             }
             emit_state(&app, "ready", ready_message);
@@ -261,18 +254,16 @@ pub async fn ensure(app: tauri::AppHandle) {
     }
 }
 
-/// Resolve a working yt-dlp program, downloading the managed executable when
-/// necessary. The stream server calls this too, which closes the first-run
-/// race where a user could press Play while AppShell was still downloading the
-/// binary and receive a misleading MEDIA_ERR_SRC_NOT_SUPPORTED.
+/// Resolve a working yt-dlp program for an explicit playlist download,
+/// downloading the managed executable when necessary.
 pub async fn ensure_ytdlp_available(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let managed = managed_path(app);
     if probe_program(&managed).await {
         return Ok(managed);
     }
 
-    // Serialize concurrent calls (StrictMode double-mount plus an immediate
-    // playback request) and double-check after acquiring the lock.
+    // Serialize explicit setup/retry calls and double-check after acquiring
+    // the lock.
     let _guard = YTDLP_LOCK.lock().await;
     if probe_program(&managed).await {
         return Ok(managed);
@@ -415,9 +406,9 @@ fn touch_deno_update_stamp(managed: &Path) {
 }
 
 /// Install (or occasionally refresh) Deno beside yt-dlp. This is deliberately
-/// best-effort: the stream command retains android_vr when no runtime is
-/// available, while a successful atomic install adds web_safari on the next
-/// resolve without restarting Goosic.
+/// best-effort: an explicit download can retain android_vr when no runtime is
+/// available, while a successful atomic install adds web_safari to the next
+/// download without restarting Goosic.
 async fn deno_needs_setup(managed_ytdlp: &Path) -> bool {
     let managed = managed_deno_path(managed_ytdlp);
     !probe_program(&managed).await
@@ -446,7 +437,7 @@ fn delay_deno_retry() {
 
 async fn ensure_deno(managed_ytdlp: &Path, refresh_existing: bool) -> Result<(), String> {
     let managed = managed_deno_path(managed_ytdlp);
-    // A normal per-track resolve only needs to know whether the atomically
+    // A normal playlist-track download only needs to know whether the atomically
     // installed runtime exists. Candidates are validated before the swap, and
     // the scheduled launch-time refresh performs the executable probe.
     if !refresh_existing && managed.is_file() {
@@ -506,9 +497,9 @@ async fn ensure_deno(managed_ytdlp: &Path, refresh_existing: bool) -> Result<(),
     }
 }
 
-/// Join first-run Deno setup before resolving a track. Failure is returned to
-/// the caller for logging only; it must continue with android_vr so runtime
-/// download outages do not disable playback that still works without EJS.
+/// Join first-run Deno setup before downloading a track. Failure is returned
+/// to the caller so it can report a limited download fallback; online playback
+/// is independent of this infrastructure.
 pub async fn ensure_js_runtime(managed_ytdlp: &Path) -> Result<(), String> {
     ensure_deno(managed_ytdlp, false).await
 }
@@ -748,12 +739,52 @@ mod tests {
             .iter()
             .map(|arg| arg.to_string_lossy())
             .collect::<Vec<_>>();
-        assert!(args.iter().any(|arg| arg == "--no-plugin-dirs"));
+        assert_eq!(
+            args.first().map(|arg| arg.as_ref()),
+            Some("--ignore-config")
+        );
+        assert_eq!(
+            args.get(1).map(|arg| arg.as_ref()),
+            Some("--no-plugin-dirs")
+        );
+        assert_eq!(
+            args.iter().filter(|arg| **arg == "--ignore-config").count(),
+            1
+        );
+        assert_eq!(
+            args.iter()
+                .filter(|arg| **arg == "--no-plugin-dirs")
+                .count(),
+            1
+        );
         assert!(args.iter().any(|arg| arg == "pot/plugins"));
         assert!(args.iter().any(|arg| arg == "youtube:player_client=mweb"));
         assert!(args
             .iter()
             .any(|arg| { arg == "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416" }));
+    }
+
+    #[test]
+    fn fallback_args_ignore_user_config_and_all_external_plugins() {
+        let args = youtube_runtime_args(Path::new("bin/yt-dlp"), None)
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(args.first().map(String::as_str), Some("--ignore-config"));
+        assert_eq!(args.get(1).map(String::as_str), Some("--no-plugin-dirs"));
+        assert_eq!(
+            args.iter().filter(|arg| *arg == "--ignore-config").count(),
+            1
+        );
+        assert_eq!(
+            args.iter().filter(|arg| *arg == "--no-plugin-dirs").count(),
+            1
+        );
+        assert!(!args.iter().any(|arg| arg == "--plugin-dirs"));
+        assert!(args
+            .iter()
+            .any(|arg| arg.starts_with("youtube:player_client=android_vr")));
     }
 
     #[test]

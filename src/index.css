@@ -305,7 +305,7 @@ html body [data-slot="sidebar-container"] {
   /* Menu lists reuse the app scrollbar, but keep its track away from the
      strongly rounded top and bottom edges of the glass panel. */
   .menu-scroll::-webkit-scrollbar-track {
-    margin-block: 20px;
+    margin-block: 24px;
   }
 
   .menu-scroll::-webkit-scrollbar-thumb {
@@ -317,7 +317,19 @@ html body [data-slot="sidebar-container"] {
      clipping. An explicit rounded clip masks both rows and thumbs so nothing
      can leak through a 34px menu/popover corner. */
   .menu-shell-clip {
-    clip-path: inset(0 round 34px);
+    /* Leave the 1px reflector outside the clipping plane. Clipping exactly
+       at zero cut the antialiased rim on scrollable menus into hard lines. */
+    clip-path: inset(-1px round 35px);
+  }
+
+  .track-playlist-menu {
+    max-height: min(
+      20rem,
+      var(
+        --radix-dropdown-menu-content-available-height,
+        var(--radix-context-menu-content-available-height)
+      )
+    );
   }
 
   /* Shared geometry shell. The two pseudo-elements deliberately mirror the
@@ -435,6 +447,15 @@ html body [data-slot="sidebar-container"] {
   .liquid-refract .glass-material-interactive {
     -webkit-backdrop-filter: var(--liquid-glass-filter, none);
     backdrop-filter: var(--liquid-glass-filter, none);
+  }
+
+  /* WKWebView cannot render Chromium's SVG url() backdrop filters, but its
+     native backdrop blur is reliable. Reuse the Figma frost scale and exclude
+     the standalone AppKit material player to avoid double-blurring it. */
+  .macos-backdrop-glass
+    .glass-material-interactive:not(.native-player-material) {
+    -webkit-backdrop-filter: blur(var(--glass-frost));
+    backdrop-filter: blur(var(--glass-frost));
   }
 }
 

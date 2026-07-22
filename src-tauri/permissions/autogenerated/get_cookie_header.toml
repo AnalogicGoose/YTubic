@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-cookie-header"
+description = "Enables the get_cookie_header command without any pre-configured scope."
+commands.allow = ["get_cookie_header"]
+
+[[permission]]
+identifier = "deny-get-cookie-header"
+description = "Denies the get_cookie_header command without any pre-configured scope."
+commands.deny = ["get_cookie_header"]

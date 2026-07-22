@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-lastfm-love"
+description = "Enables the lastfm_love command without any pre-configured scope."
+commands.allow = ["lastfm_love"]
+
+[[permission]]
+identifier = "deny-lastfm-love"
+description = "Denies the lastfm_love command without any pre-configured scope."
+commands.deny = ["lastfm_love"]

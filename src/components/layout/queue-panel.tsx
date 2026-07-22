@@ -44,12 +44,13 @@ type Tab = "queue" | "history";
  * Popover anchored to the queue button (bottom-bar variant).
  */
 export function QueueBody({ onClose }: { onClose?: () => void }) {
-  const { queue, index, playing, autoRadio } = usePlaybackStore(
+  const { queue, index, playing, autoRadio, advertisement } = usePlaybackStore(
     useShallow((s) => ({
       queue: s.queue,
       index: s.index,
       playing: s.playing,
       autoRadio: s.autoRadio,
+      advertisement: s.advertisement,
     })),
   );
   const active = usePlaybackStore(currentTrack);
@@ -111,8 +112,8 @@ export function QueueBody({ onClose }: { onClose?: () => void }) {
                 variant="ghost"
                 size="icon"
                 aria-label="Clear queue"
-                disabled={queue.length === 0}
-                onClick={clearQueue}
+                disabled={queue.length === 0 || advertisement}
+                onClick={() => clearQueue()}
               >
                 <Trash2Icon />
               </Button>
@@ -159,6 +160,7 @@ export function QueueBody({ onClose }: { onClose?: () => void }) {
               history={history}
               onGoTo={goTo}
               onRemoveAt={removeAt}
+              allowRemoval={!advertisement}
             />
           )}
         </div>
@@ -283,10 +285,12 @@ function HistoryTabBody({
   history,
   onGoTo,
   onRemoveAt,
+  allowRemoval,
 }: {
   history: NonNullable<ReturnType<typeof currentTrack>>[];
   onGoTo: (i: number) => void;
   onRemoveAt: (i: number) => void;
+  allowRemoval: boolean;
 }) {
   if (history.length === 0) {
     return (
@@ -300,7 +304,7 @@ function HistoryTabBody({
           key={`h-${t.videoId}-${i}`}
           track={t}
           onActivate={() => onGoTo(i)}
-          onRemove={() => onRemoveAt(i)}
+          onRemove={allowRemoval ? () => onRemoveAt(i) : undefined}
         />
       ))}
     </QueueSection>

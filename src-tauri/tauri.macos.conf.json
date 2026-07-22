@@ -23,5 +23,10 @@
         "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,HardwareMediaKeyHandling,MediaSessionService"
       }
     ]
+  },
+  "bundle": {
+    "macOS": {
+      "minimumSystemVersion": "14.0"
+    }
   }
 }

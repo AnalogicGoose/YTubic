@@ -93,10 +93,10 @@ export const useTrackSourceStore = create<State>()(
 
 /**
  * In the floating player window, redirect mutations to the main window
- * so its audio engine sees the updated source preference and re-runs
- * the stream resolver. Same reasoning as the playback-store remote
- * control above; the main side echoes the resulting `byVideoId` back
- * via `track-source:state`.
+ * so its audio engine sees the updated source preference and reloads the
+ * official WebPlayer with the selected song/video id. Same reasoning as the
+ * playback-store remote control above; the main side echoes the resulting
+ * `byVideoId` back via `track-source:state`.
  *
  * Call this from the floating window's entrypoint module before any
  * component reads from the store. Guarded so a bundle-level call from

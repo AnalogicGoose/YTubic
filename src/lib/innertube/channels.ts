@@ -1,11 +1,4 @@
-import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
-import {
-  authHeaders,
-  captureSetCookies,
-  readRuns,
-  DESKTOP_UA,
-  type YtNode,
-} from "./shared";
+import { authHeaders, innertubePost, readRuns, type YtNode } from "./shared";
 
 /**
  * One selectable YouTube identity inside the signed-in Google account:
@@ -16,6 +9,11 @@ import {
 export type ChannelChoice = {
   /** Value for the `X-Goog-PageId` header; null = personal channel. */
   pageId: string | null;
+  /**
+   * Server-issued identity-switch URL. Credential-bearing and intentionally
+   * memory-only: never log it or copy it into persisted account metadata.
+   */
+  signinUrl: string | null;
   name: string;
   photoUrl?: string;
   /** Secondary line YT ships for the row (email, "Brand Account", …). */
@@ -24,15 +22,41 @@ export type ChannelChoice = {
   selected: boolean;
 };
 
-const SWITCHER_URL = "https://music.youtube.com/getAccountSwitcherEndpoint";
+const YOUTUBE_SIGNIN_ORIGIN = "https://www.youtube.com";
 
 /**
- * YouTube prefixes switcher JSON with the XSSI guard `)]}'`. Strip it
- * (and anything else before the first `{` or `[`) so JSON.parse works.
+ * Resolve and strictly validate an `accountSigninToken.signinUrl` without
+ * inspecting or rewriting its credential-bearing query string.
+ *
+ * YouTube currently returns root-relative URLs, but protocol-relative and
+ * already-absolute forms are handled defensively. Only the HTTPS
+ * `www.youtube.com/signin` endpoint is accepted.
  */
-export function stripXssiPrefix(text: string): string {
-  const start = text.search(/[[{]/);
-  return start > 0 ? text.slice(start) : text;
+export function resolveAccountSigninUrl(raw: unknown): string | null {
+  if (typeof raw !== "string" || raw.length === 0 || raw !== raw.trim()) {
+    return null;
+  }
+
+  let url: URL;
+  try {
+    url = new URL(raw, YOUTUBE_SIGNIN_ORIGIN);
+  } catch {
+    return null;
+  }
+
+  if (
+    url.protocol !== "https:" ||
+    url.hostname !== "www.youtube.com" ||
+    url.port !== "" ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.pathname !== "/signin" ||
+    url.hash !== ""
+  ) {
+    return null;
+  }
+
+  return url.href;
 }
 
 /**
@@ -43,29 +67,7 @@ export function stripXssiPrefix(text: string): string {
 export async function fetchChannelList(): Promise<ChannelChoice[]> {
   const auth = await authHeaders();
   if (!auth.Cookie) return [];
-  const res = await tauriFetch(SWITCHER_URL, {
-    method: "GET",
-    headers: {
-      ...auth,
-      "User-Agent": DESKTOP_UA,
-      Referer: "https://music.youtube.com/",
-      "Accept-Language": "en-US,en;q=0.9",
-    },
-  });
-  // This page-level endpoint is the one that mints the post-login
-  // LOGIN_INFO / SIDCC burst; echoing it into the jar is what keeps
-  // the fresh session alive (see captureSetCookies).
-  await captureSetCookies(res);
-  if (!res.ok) {
-    throw new Error(`account switcher: HTTP ${res.status}`);
-  }
-  const text = await res.text();
-  let json: unknown;
-  try {
-    json = JSON.parse(stripXssiPrefix(text));
-  } catch {
-    throw new Error("account switcher: response is not JSON");
-  }
+  const json = await innertubePost("account/accounts_list", {});
   return parseAccountSwitcher(json);
 }
 
@@ -109,14 +111,18 @@ function mapAccountItem(item: YtNode): ChannelChoice | null {
   if (!name) return null;
 
   // Brand channels carry a pageIdToken among the endpoint's tokens;
-  // the personal channel has none.
+  // the personal channel has none. Both identities carry a short-lived
+  // signin URL used to pin the playback WebView to that exact identity.
   let pageId: string | null = null;
+  let signinUrl: string | null = null;
   const tokens: YtNode[] = endpoint.supportedTokens ?? [];
   for (const t of tokens) {
     const pid = t?.pageIdToken?.pageId;
-    if (typeof pid === "string" && pid) {
+    if (pageId === null && typeof pid === "string" && pid) {
       pageId = pid;
-      break;
+    }
+    if (signinUrl === null) {
+      signinUrl = resolveAccountSigninUrl(t?.accountSigninToken?.signinUrl);
     }
   }
 
@@ -125,6 +131,7 @@ function mapAccountItem(item: YtNode): ChannelChoice | null {
 
   return {
     pageId,
+    signinUrl,
     name,
     photoUrl,
     byline: readRuns(item.accountByline) || undefined,

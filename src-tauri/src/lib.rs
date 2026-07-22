@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,6 +32,7 @@ mod media;
 mod native_glass;
 mod pot_provider;
 mod secure_store;
+mod web_player;
 mod ytdlp;
 
 fn sanitize_video_id(id: &str) -> bool {
@@ -40,6 +41,36 @@ fn sanitize_video_id(id: &str) -> bool {
         && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+fn validate_account_signin_url(raw: &str) -> Result<tauri::Url, String> {
+    if raw.is_empty() || raw != raw.trim() || raw.chars().any(char::is_whitespace) {
+        return Err("invalid account verification URL".into());
+    }
+    let url = raw
+        .parse::<tauri::Url>()
+        .map_err(|_| "invalid account verification URL".to_string())?;
+    if url.scheme() != "https"
+        || url.host_str() != Some("www.youtube.com")
+        || url.port().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/signin"
+        || url.fragment().is_some()
+    {
+        return Err("invalid account verification URL".into());
+    }
+    Ok(url)
+}
+
+fn validate_page_id(page_id: Option<&str>) -> bool {
+    page_id.is_none_or(|value| {
+        !value.is_empty()
+            && value.len() <= 128
+            && value
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+    })
 }
 
 /// Per-account metadata persisted in `accounts.json`. Cookies are NOT
@@ -67,6 +98,13 @@ struct Account {
     channel_name: Option<String>,
     #[serde(default, rename = "channelPhotoUrl")]
     channel_photo_url: Option<String>,
+    /// `Some(true)` means the official playback WebView was navigated through
+    /// YouTube's server-issued identity URL and its DATASYNC_ID matched this
+    /// row. `Some(false)` blocks playback after an interrupted/failed switch.
+    /// Legacy personal-channel rows remain `None` and are accepted; legacy
+    /// brand rows must be re-selected once before official playback.
+    #[serde(default, rename = "webPlayerIdentityVerified")]
+    web_player_identity_verified: Option<bool>,
     /// Unix seconds when this account was first added.
     #[serde(default, rename = "addedAt")]
     added_at: i64,
@@ -99,6 +137,8 @@ struct AccountSummary {
     channel_name: Option<String>,
     #[serde(rename = "channelPhotoUrl")]
     channel_photo_url: Option<String>,
+    #[serde(rename = "webPlayerIdentityVerified")]
+    web_player_identity_verified: Option<bool>,
     #[serde(rename = "isActive")]
     is_active: bool,
 }
@@ -131,6 +171,32 @@ fn account_webview_dir(app: &tauri::AppHandle, id: &str) -> PathBuf {
     accounts_dir(app).join(id).join("webview")
 }
 
+/// Stable 128-bit WKWebsiteDataStore identifier for a local account profile.
+/// `data_directory` is ignored by WKWebView, while this API gives macOS 14+
+/// the same account isolation that WebView2/WebKitGTK get from directories.
+#[cfg(target_os = "macos")]
+fn account_webview_store_identifier(id: &str) -> [u8; 16] {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(format!("goosic-webview-profile:{id}").as_bytes());
+    let mut identifier = [0u8; 16];
+    identifier.copy_from_slice(&digest[..16]);
+    identifier
+}
+
+#[cfg(target_os = "macos")]
+async fn remove_account_webview_store(app: &tauri::AppHandle, id: &str) {
+    let identifier = account_webview_store_identifier(&format!("account:{id}"));
+    if let Err(error) = app.remove_data_store(identifier).await {
+        // Custom WKWebsiteDataStore removal is available on macOS 14+. Account
+        // deletion must still succeed on older systems, where WebKit uses the
+        // shared legacy store and exposes no per-identifier removal API.
+        eprintln!("[accounts] could not remove a macOS WebView account store: {error}");
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn remove_account_webview_store(_app: &tauri::AppHandle, _id: &str) {}
+
 /// Safari UA for macOS WKWebView. Google's sign-in rejects the default
 /// embedded-WebKit identity, while the native Safari identity is the same
 /// supported pattern used by Kaset's macOS YouTube Music login.
@@ -140,8 +206,12 @@ const YT_LOGIN_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) \
 
 /// Chrome UA the Windows WebView2 login and refresh WebViews present to
 /// Google. Kept identical so the issued session can be refreshed later.
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
 const YT_LOGIN_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+     (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36";
+
+#[cfg(target_os = "linux")]
+const YT_LOGIN_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
      (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36";
 
 /// WebView2 browser args shared by the login window and the session-keeper.
@@ -149,10 +219,13 @@ const YT_LOGIN_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit
 /// every instance on a shared user-data folder to pass identical args, so
 /// these have to match. They also stop both windows from grabbing the
 /// hardware media keys or running a media session (which would hijack
-/// play/pause from the real player), and block autoplay so a hidden keeper
-/// never starts making sound on its own.
+/// play/pause from Goosic's own media integration). The same persisted profile
+/// is reused by the hidden official player, so autoplay must be enabled.
 const YT_WEBVIEW_ARGS: &str = "--disable-features=HardwareMediaKeyHandling,MediaSessionService \
-     --autoplay-policy=user-gesture-required";
+     --autoplay-policy=no-user-gesture-required \
+     --disable-background-timer-throttling \
+     --disable-backgrounding-occluded-windows \
+     --disable-renderer-backgrounding";
 
 /// WebView2 browser args for windows on the DEFAULT user-data folder — the
 /// main window and the floating player. Must stay byte-identical to
@@ -283,6 +356,10 @@ fn generate_account_id() -> String {
 /// decryption fails (treat as logged-out).
 async fn read_cookies_plain(app: &tauri::AppHandle) -> Option<String> {
     let path = active_cookies_path(app).await?;
+    read_cookies_plain_from_path(&path).await
+}
+
+async fn read_cookies_plain_from_path(path: &std::path::Path) -> Option<String> {
     let encrypted = tokio::fs::read(&path).await.ok()?;
     let plain = tokio::task::spawn_blocking(move || secure_store::decrypt(&encrypted))
         .await
@@ -703,7 +780,7 @@ async fn start_login(app: tauri::AppHandle) -> Result<(), String> {
 
     let url = login_url.parse::<tauri::Url>().map_err(|e| e.to_string())?;
 
-    let win = WebviewWindowBuilder::new(&app, "login", WebviewUrl::External(url))
+    let builder = WebviewWindowBuilder::new(&app, "login", WebviewUrl::External(url))
         .title("Sign in - accounts.google.com")
         .inner_size(500.0, 720.0)
         .min_inner_size(420.0, 560.0)
@@ -717,9 +794,12 @@ async fn start_login(app: tauri::AppHandle) -> Result<(), String> {
         .on_page_load(|win, payload| {
             let host = payload.url().host_str().unwrap_or("???");
             let _ = win.set_title(&format!("Sign in - {host}"));
-        })
-        .build()
-        .map_err(|e| e.to_string())?;
+        });
+    #[cfg(target_os = "macos")]
+    let builder = builder.data_store_identifier(account_webview_store_identifier(&format!(
+        "account:{account_id}"
+    )));
+    let win = builder.build().map_err(|e| e.to_string())?;
 
     let app_poll = app.clone();
     // Failure paths wipe the whole account dir (profile + jar); on
@@ -845,7 +925,23 @@ async fn start_login(app: tauri::AppHandle) -> Result<(), String> {
                 return;
             }
 
+            let account_session = app_poll.state::<AccountSessionGuard>();
+            let session_lock = account_session.inner().mutation.lock().await;
+            let refresh_guard = app_poll.state::<RefreshGuard>();
+            let _profile_lock = refresh_guard.inner().0.lock().await;
             let mut idx = read_index(&app_poll).await;
+            // Switching the active browser profile is an isolation boundary.
+            // Close any guest/previous-account playback owner before the new
+            // account becomes visible to commands that read `idx.active`.
+            let player = app_poll.state::<web_player::WebPlayerState>();
+            if let Err(error) = web_player::reset(&app_poll, player.inner()).await {
+                eprintln!("[login] could not stop previous playback profile: {error}");
+                let _ = app_poll.emit("login-cancelled", ());
+                let _ = win.close();
+                let _ = tokio::fs::remove_dir_all(&cleanup_dir).await;
+                remove_account_webview_store(&app_poll, &new_id).await;
+                return;
+            }
             let now_s = time::OffsetDateTime::now_utc().unix_timestamp();
             idx.accounts.push(Account {
                 id: new_id.clone(),
@@ -871,6 +967,8 @@ async fn start_login(app: tauri::AppHandle) -> Result<(), String> {
                 let _ = tokio::fs::remove_dir_all(&cleanup_dir).await;
                 return;
             }
+            account_session.inner().advance();
+            drop(session_lock);
 
             // `login-success` is the soft signal: the frontend invalidates
             // its auth queries so the meta backfill runs with the new
@@ -926,7 +1024,7 @@ async fn ensure_session_keeper(
     // "visible" state can't drag it back on-screen next launch either. The
     // webview still loads and keeps the session alive regardless of
     // visibility or position.
-    let win = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(url))
+    let builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(url))
         .title("Goosic session keeper")
         .visible(false)
         .decorations(false)
@@ -936,7 +1034,11 @@ async fn ensure_session_keeper(
         .inner_size(1024.0, 768.0)
         .data_directory(account_webview_dir(app, id))
         .user_agent(YT_LOGIN_UA)
-        .additional_browser_args(YT_WEBVIEW_ARGS)
+        .additional_browser_args(YT_WEBVIEW_ARGS);
+    #[cfg(target_os = "macos")]
+    let builder =
+        builder.data_store_identifier(account_webview_store_identifier(&format!("account:{id}")));
+    let win = builder
         .build()
         .map_err(|e| format!("build session-keeper: {e}"))?;
     // Force-hide on top of visible(false): if WebView2 shows the host window
@@ -995,10 +1097,23 @@ async fn refresh_account_cookies(app: &tauri::AppHandle, id: &str) -> Result<(),
     let guard = app.state::<RefreshGuard>();
     let _lock = guard.inner().0.lock().await;
 
-    let (win, created) = ensure_session_keeper(app, id).await?;
+    // Active playback already keeps the same browser profile warm. Reuse it
+    // only when it belongs to this exact account.
+    let player_state = app.state::<web_player::WebPlayerState>();
+    let player_matches =
+        web_player::uses_profile(player_state.inner(), &format!("account:{id}")).await;
+    let (win, created, is_player) = if player_matches {
+        let player = app
+            .get_webview_window("youtube-player")
+            .ok_or_else(|| "matching playback profile disappeared".to_string())?;
+        (player, false, true)
+    } else {
+        let (keeper, created) = ensure_session_keeper(app, id).await?;
+        (keeper, created, false)
+    };
     // A reused keeper is reloaded to force fresh authenticated traffic; a
     // just-created one is already loading the URL from the builder.
-    if !created {
+    if !created && !is_player {
         if let Ok(u) = "https://music.youtube.com/".parse::<tauri::Url>() {
             let _ = win.navigate(u);
         }
@@ -1057,9 +1172,15 @@ async fn refresh_account_cookies(app: &tauri::AppHandle, id: &str) -> Result<(),
 /// instead of only when the periodic timer fires. Returns `false` when
 /// nobody is signed in.
 #[tauri::command]
-async fn refresh_active_session(app: tauri::AppHandle) -> Result<bool, String> {
-    let idx = read_index(&app).await;
-    let Some(active) = idx.active else {
+async fn refresh_active_session(
+    app: tauri::AppHandle,
+    session: tauri::State<'_, AccountSessionGuard>,
+) -> Result<bool, String> {
+    let active = {
+        let _session = session.mutation.lock().await;
+        read_index(&app).await.active
+    };
+    let Some(active) = active else {
         return Ok(false);
     };
     match refresh_account_cookies(&app, &active).await {
@@ -1078,6 +1199,17 @@ async fn read_cookie_header(app: &tauri::AppHandle, host: &str) -> String {
     let Some(content) = read_cookies_plain(app).await else {
         return String::new();
     };
+    cookie_header_from_jar(&content, host)
+}
+
+async fn read_cookie_header_from_path(path: &std::path::Path, host: &str) -> String {
+    let Some(content) = read_cookies_plain_from_path(path).await else {
+        return String::new();
+    };
+    cookie_header_from_jar(&content, host)
+}
+
+fn cookie_header_from_jar(content: &str, host: &str) -> String {
     let mut parts: Vec<String> = Vec::new();
     for line in content.lines() {
         if line.starts_with('#') || line.trim().is_empty() {
@@ -1100,12 +1232,21 @@ async fn read_cookie_header(app: &tauri::AppHandle, host: &str) -> String {
 }
 
 #[tauri::command]
-async fn get_cookie_header(app: tauri::AppHandle, host: String) -> Result<String, String> {
+async fn get_cookie_header(
+    app: tauri::AppHandle,
+    session: tauri::State<'_, AccountSessionGuard>,
+    host: String,
+) -> Result<String, String> {
+    let _session = session.mutation.lock().await;
     Ok(read_cookie_header(&app, &host).await)
 }
 
 #[tauri::command]
-async fn is_logged_in(app: tauri::AppHandle) -> Result<bool, String> {
+async fn is_logged_in(
+    app: tauri::AppHandle,
+    session: tauri::State<'_, AccountSessionGuard>,
+) -> Result<bool, String> {
+    let _session = session.mutation.lock().await;
     let header = read_cookie_header(&app, "music.youtube.com").await;
     Ok(header.contains("SAPISID") || header.contains("__Secure-1PSID"))
 }
@@ -1235,32 +1376,28 @@ async fn open_player_window(
     #[cfg(not(target_os = "macos"))]
     let player_url = "index.html?floating-player=1".to_owned();
 
-    let win = WebviewWindowBuilder::new(
-        &app,
-        "player",
-        WebviewUrl::App(player_url.into()),
-    )
-    .title("Goosic — player")
-    .decorations(false)
-    // The web surface clips itself to the outer 16px window radius. A transparent
-    // native window lets those clipped corners reveal the desktop instead of
-    // the WebView's otherwise rectangular black backing layer.
-    .transparent(true)
-    .inner_size(360.0, 720.0)
-    .min_inner_size(320.0, 560.0)
-    .resizable(true)
-    .skip_taskbar(false)
-    // Tauri's default drag/drop handler swallows in-page HTML5 drag
-    // events on WebView2, breaking the queue reorder. We don't
-    // accept dropped files anywhere in the app, so disabling the
-    // handler entirely is purely upside. The doc string for this
-    // method literally calls out HTML5 DnD on Windows as the use case.
-    .disable_drag_drop_handler()
-    // Shares the default user-data folder with the main window, so the
-    // args must match the main window's `additionalBrowserArgs` exactly.
-    .additional_browser_args(APP_WEBVIEW_ARGS)
-    .build()
-    .map_err(|e| e.to_string())?;
+    let win = WebviewWindowBuilder::new(&app, "player", WebviewUrl::App(player_url.into()))
+        .title("Goosic — player")
+        .decorations(false)
+        // The web surface clips itself to the outer 16px window radius. A transparent
+        // native window lets those clipped corners reveal the desktop instead of
+        // the WebView's otherwise rectangular black backing layer.
+        .transparent(true)
+        .inner_size(360.0, 720.0)
+        .min_inner_size(320.0, 560.0)
+        .resizable(true)
+        .skip_taskbar(false)
+        // Tauri's default drag/drop handler swallows in-page HTML5 drag
+        // events on WebView2, breaking the queue reorder. We don't
+        // accept dropped files anywhere in the app, so disabling the
+        // handler entirely is purely upside. The doc string for this
+        // method literally calls out HTML5 DnD on Windows as the use case.
+        .disable_drag_drop_handler()
+        // Shares the default user-data folder with the main window, so the
+        // args must match the main window's `additionalBrowserArgs` exactly.
+        .additional_browser_args(APP_WEBVIEW_ARGS)
+        .build()
+        .map_err(|e| e.to_string())?;
     #[cfg(target_os = "macos")]
     native_glass::install(&win)?;
     // Dev builds: orange taskbar icon, same as the main window.
@@ -1291,7 +1428,25 @@ async fn close_player_window(app: tauri::AppHandle) -> Result<(), String> {
 /// — "the app forgets you entirely" — extended to the multi-account
 /// world.
 #[tauri::command]
-async fn clear_cookies(app: tauri::AppHandle) -> Result<(), String> {
+async fn clear_cookies(
+    app: tauri::AppHandle,
+    session: tauri::State<'_, AccountSessionGuard>,
+    refresh_guard: tauri::State<'_, RefreshGuard>,
+) -> Result<(), String> {
+    let _session = session.mutation.lock().await;
+    let _profile = refresh_guard.inner().0.lock().await;
+    let account_ids: Vec<String> = read_index(&app)
+        .await
+        .accounts
+        .into_iter()
+        .map(|account| account.id)
+        .collect();
+    let player = app.state::<web_player::WebPlayerState>();
+    web_player::reset(&app, player.inner()).await?;
+    web_player::close_keepers(&app).await?;
+    for id in &account_ids {
+        remove_account_webview_store(&app, id).await;
+    }
     let dir = accounts_dir(&app);
     if dir.exists() {
         tokio::fs::remove_dir_all(&dir)
@@ -1310,12 +1465,17 @@ async fn clear_cookies(app: tauri::AppHandle) -> Result<(), String> {
     if legacy.exists() {
         let _ = tokio::fs::remove_file(&legacy).await;
     }
+    session.advance();
     let _ = app.emit("accounts-changed", ());
     Ok(())
 }
 
 #[tauri::command]
-async fn list_accounts(app: tauri::AppHandle) -> Result<Vec<AccountSummary>, String> {
+async fn list_accounts(
+    app: tauri::AppHandle,
+    session: tauri::State<'_, AccountSessionGuard>,
+) -> Result<Vec<AccountSummary>, String> {
+    let _session = session.mutation.lock().await;
     let idx = read_index(&app).await;
     let active = idx.active.clone();
     Ok(idx
@@ -1331,6 +1491,7 @@ async fn list_accounts(app: tauri::AppHandle) -> Result<Vec<AccountSummary>, Str
                 page_id: a.page_id,
                 channel_name: a.channel_name,
                 channel_photo_url: a.channel_photo_url,
+                web_player_identity_verified: a.web_player_identity_verified,
                 is_active,
             }
         })
@@ -1341,7 +1502,14 @@ async fn list_accounts(app: tauri::AppHandle) -> Result<Vec<AccountSummary>, Str
 /// cookies on its next request via `get_cookie_header`; the frontend
 /// invalidates its query cache on the `accounts-changed` event.
 #[tauri::command]
-async fn switch_account(app: tauri::AppHandle, id: String) -> Result<(), String> {
+async fn switch_account(
+    app: tauri::AppHandle,
+    session: tauri::State<'_, AccountSessionGuard>,
+    refresh_guard: tauri::State<'_, RefreshGuard>,
+    id: String,
+) -> Result<(), String> {
+    let _session = session.mutation.lock().await;
+    let _profile = refresh_guard.inner().0.lock().await;
     let mut idx = read_index(&app).await;
     if !idx.accounts.iter().any(|a| a.id == id) {
         return Err(format!("no such account: {id}"));
@@ -1349,8 +1517,11 @@ async fn switch_account(app: tauri::AppHandle, id: String) -> Result<(), String>
     if idx.active.as_deref() == Some(id.as_str()) {
         return Ok(()); // already active — silent no-op
     }
+    let player = app.state::<web_player::WebPlayerState>();
+    web_player::reset(&app, player.inner()).await?;
     idx.active = Some(id);
     write_index(&app, &idx).await?;
+    session.advance();
     let _ = app.emit("accounts-changed", ());
     Ok(())
 }
@@ -1360,19 +1531,32 @@ async fn switch_account(app: tauri::AppHandle, id: String) -> Result<(), String>
 /// `None` when this was the last). Deletes the per-account cookies
 /// directory off disk in the same call.
 #[tauri::command]
-async fn remove_account(app: tauri::AppHandle, id: String) -> Result<(), String> {
+async fn remove_account(
+    app: tauri::AppHandle,
+    session: tauri::State<'_, AccountSessionGuard>,
+    refresh_guard: tauri::State<'_, RefreshGuard>,
+    id: String,
+) -> Result<(), String> {
+    let _session = session.mutation.lock().await;
+    let _profile = refresh_guard.inner().0.lock().await;
     let mut idx = read_index(&app).await;
     let pos = idx
         .accounts
         .iter()
         .position(|a| a.id == id)
         .ok_or_else(|| format!("no such account: {id}"))?;
-    idx.accounts.remove(pos);
-    // Close this account's session-keeper (if running) so its webview
-    // releases the profile directory before we delete it.
-    if let Some(w) = app.get_webview_window(&format!("keeper-{id}")) {
-        let _ = w.close();
+    let player = app.state::<web_player::WebPlayerState>();
+    let removed_profile = format!("account:{id}");
+    if idx.active.as_deref() == Some(id.as_str())
+        || web_player::uses_profile(player.inner(), &removed_profile).await
+    {
+        web_player::reset(&app, player.inner()).await?;
     }
+    idx.accounts.remove(pos);
+    // Release all browser-profile owners before deleting this account. The
+    // other accounts' keepers are recreated lazily by their next refresh.
+    web_player::close_keepers(&app).await?;
+    remove_account_webview_store(&app, &id).await;
     let dir = accounts_dir(&app).join(&id);
     if dir.exists() {
         let _ = tokio::fs::remove_dir_all(&dir).await;
@@ -1381,6 +1565,7 @@ async fn remove_account(app: tauri::AppHandle, id: String) -> Result<(), String>
         idx.active = idx.accounts.first().map(|a| a.id.clone());
     }
     write_index(&app, &idx).await?;
+    session.advance();
     let _ = app.emit("accounts-changed", ());
     Ok(())
 }
@@ -1397,11 +1582,15 @@ async fn remove_account(app: tauri::AppHandle, id: String) -> Result<(), String>
 #[tauri::command]
 async fn update_account_meta(
     app: tauri::AppHandle,
+    session: tauri::State<'_, AccountSessionGuard>,
+    refresh_guard: tauri::State<'_, RefreshGuard>,
     id: String,
     name: String,
     email: String,
     #[allow(non_snake_case)] photoUrl: Option<String>,
 ) -> Result<(), String> {
+    let _session = session.mutation.lock().await;
+    let _profile = refresh_guard.inner().0.lock().await;
     let photo_url = photoUrl;
     let mut idx = read_index(&app).await;
 
@@ -1461,6 +1650,7 @@ async fn update_account_meta(
     // leaves `idx.active` alone.
     let mut active_changed = false;
 
+    let identity_rebound = dup_pos.is_some();
     if let Some(other_pos) = dup_pos {
         let other_id = idx.accounts[other_pos].id.clone();
         let this_cookies = account_cookies_path(&app, &id);
@@ -1496,7 +1686,7 @@ async fn update_account_meta(
             }
             if !moved {
                 eprintln!(
-                    "[accounts] could not move webview profile {id} -> {other_id}; \
+                    "[accounts] could not move a deduplicated webview profile; \
                      re-login needed to re-arm session refresh"
                 );
             }
@@ -1516,6 +1706,13 @@ async fn update_account_meta(
             // empty; never wipe it with a photo-less response.
             if photo_url.is_some() {
                 other.photo_url = photo_url;
+            }
+            // The freshly moved browser profile came from a new Google login,
+            // not from a verified brand-channel switch. Keep a stored brand
+            // page id for InnerTube, but require it to be selected again before
+            // official WebPlayer playback can use this replacement profile.
+            if other.page_id.is_some() {
+                other.web_player_identity_verified = Some(false);
             }
         }
         if idx.active.as_deref() != Some(other_id.as_str()) {
@@ -1555,6 +1752,9 @@ async fn update_account_meta(
     }
 
     write_index(&app, &idx).await?;
+    if identity_rebound {
+        session.advance();
+    }
     if was_fresh_add || active_changed {
         let _ = app.emit("accounts-changed", ());
     }
@@ -1565,38 +1765,90 @@ async fn update_account_meta(
 /// signed out. Frontend uses this to pair fresh `account_menu` info
 /// with the right account row.
 #[tauri::command]
-async fn get_active_account_id(app: tauri::AppHandle) -> Result<Option<String>, String> {
+async fn get_active_account_id(
+    app: tauri::AppHandle,
+    session: tauri::State<'_, AccountSessionGuard>,
+) -> Result<Option<String>, String> {
+    let _session = session.mutation.lock().await;
     Ok(read_index(&app).await.active)
 }
 
 /// Select which YouTube channel (personal or brand) an account acts
 /// as. `pageId: None` selects the personal channel. When the choice on
-/// the ACTIVE account actually changes we emit `accounts-changed`:
-/// library, likes and home are channel-scoped, so the frontend must
-/// run the same full reset as an account switch.
+/// verification succeeds we emit `accounts-changed` even when re-selecting
+/// the stored page id: the verification document replaces the old player and
+/// may rotate the browser identity, so every cached owner must reset.
 #[tauri::command]
 async fn set_account_channel(
     app: tauri::AppHandle,
+    player: tauri::State<'_, web_player::WebPlayerState>,
+    server: tauri::State<'_, StreamServerState>,
+    session: tauri::State<'_, AccountSessionGuard>,
+    refresh_guard: tauri::State<'_, RefreshGuard>,
     id: String,
     #[allow(non_snake_case)] pageId: Option<String>,
+    #[allow(non_snake_case)] signinUrl: String,
     #[allow(non_snake_case)] channelName: Option<String>,
     #[allow(non_snake_case)] channelPhotoUrl: Option<String>,
 ) -> Result<(), String> {
-    let mut idx = read_index(&app).await;
-    let is_active = idx.active.as_deref() == Some(id.as_str());
-    let acct = idx
-        .accounts
-        .iter_mut()
-        .find(|a| a.id == id)
-        .ok_or_else(|| format!("no such account: {id}"))?;
-    let changed = acct.page_id != pageId;
-    acct.page_id = pageId;
-    acct.channel_name = channelName;
-    acct.channel_photo_url = channelPhotoUrl;
-    write_index(&app, &idx).await?;
-    if changed && is_active {
-        let _ = app.emit("accounts-changed", ());
+    if !validate_page_id(pageId.as_deref()) {
+        return Err("invalid channel selection".into());
     }
+    // Parse without reconstructing, persisting, or logging the opaque query.
+    let signin_url = validate_account_signin_url(&signinUrl)?;
+    let port = *server.port.lock().await;
+    let token = server.web_player_token.lock().await.clone();
+    let (port, token) = match (port, token) {
+        (Some(port), Some(token)) => (port, token),
+        _ => return Err("playback bridge is not ready".into()),
+    };
+    let bridge_url = format!("http://127.0.0.1:{port}/{token}/web-player/identity");
+    let _session = session.mutation.lock().await;
+    let mut idx = read_index(&app).await;
+    if idx.active.as_deref() != Some(id.as_str()) {
+        return Err("the selected account is no longer active".into());
+    }
+    let account_position = idx
+        .accounts
+        .iter()
+        .position(|account| account.id == id)
+        .ok_or_else(|| "the selected account no longer exists".to_string())?;
+    if !account_webview_dir(&app, &id).exists() {
+        return Err("sign in again before selecting a YouTube channel".into());
+    }
+
+    // Persist only a fail-closed marker before navigation. The existing page
+    // id and display metadata remain untouched unless verification succeeds.
+    idx.accounts[account_position].web_player_identity_verified = Some(false);
+    write_index(&app, &idx).await?;
+    // Cookie refresh and identity selection both own the same native profile.
+    let _profile = refresh_guard.inner().0.lock().await;
+    web_player::select_identity(
+        &app,
+        player.inner(),
+        bridge_url,
+        format!("account:{id}"),
+        account_webview_dir(&app, &id),
+        YT_LOGIN_UA,
+        YT_WEBVIEW_ARGS,
+        signin_url,
+        pageId.as_deref(),
+    )
+    .await?;
+
+    // The account lock has stayed held across verification, so this remains
+    // the same active row. Commit the requested identity atomically only now.
+    let account = &mut idx.accounts[account_position];
+    account.page_id = pageId;
+    account.channel_name = channelName;
+    account.channel_photo_url = channelPhotoUrl;
+    account.web_player_identity_verified = Some(true);
+    write_index(&app, &idx).await?;
+    // Even a re-verification of the stored page id closes the old playback
+    // document and can rotate the browser identity. Invalidate every cached
+    // auth/player snapshot after a successful proof.
+    session.advance();
+    let _ = app.emit("accounts-changed", ());
     Ok(())
 }
 
@@ -1610,21 +1862,77 @@ struct AuthContext {
     cookie: String,
     #[serde(rename = "pageId")]
     page_id: Option<String>,
+    #[serde(rename = "accountId")]
+    account_id: Option<String>,
+    epoch: u64,
 }
 
 #[tauri::command]
-async fn get_auth_context(app: tauri::AppHandle, host: String) -> Result<AuthContext, String> {
-    let cookie = read_cookie_header(&app, &host).await;
-    let page_id = if cookie.is_empty() {
-        None
-    } else {
-        let idx = read_index(&app).await;
-        idx.accounts
-            .iter()
-            .find(|a| idx.active.as_deref() == Some(a.id.as_str()))
-            .and_then(|a| a.page_id.clone())
+async fn get_auth_context(
+    app: tauri::AppHandle,
+    session: tauri::State<'_, AccountSessionGuard>,
+    host: String,
+) -> Result<AuthContext, String> {
+    let _session = session.mutation.lock().await;
+    let epoch = session.epoch.load(Ordering::Acquire);
+    let idx = read_index(&app).await;
+    let Some(account) = idx
+        .accounts
+        .iter()
+        .find(|account| idx.active.as_deref() == Some(account.id.as_str()))
+    else {
+        return Ok(AuthContext {
+            cookie: String::new(),
+            page_id: None,
+            account_id: None,
+            epoch,
+        });
     };
-    Ok(AuthContext { cookie, page_id })
+    let cookie =
+        read_cookie_header_from_path(&account_cookies_path(&app, &account.id), &host).await;
+    if cookie.is_empty() {
+        return Ok(AuthContext {
+            cookie,
+            page_id: None,
+            account_id: None,
+            epoch,
+        });
+    }
+    Ok(AuthContext {
+        cookie,
+        page_id: account.page_id.clone(),
+        account_id: Some(account.id.clone()),
+        epoch,
+    })
+}
+
+/// Serializes changes to the active account/channel identity with auth
+/// snapshots and response-cookie merges. `epoch` lets a delayed HTTP response
+/// prove it still belongs to the snapshot that initiated it.
+#[derive(Default)]
+struct AccountSessionGuard {
+    mutation: tokio::sync::Mutex<()>,
+    epoch: AtomicU64,
+}
+
+impl AccountSessionGuard {
+    fn advance(&self) {
+        self.epoch.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+fn auth_snapshot_is_current(
+    index: &AccountsIndex,
+    account_id: &str,
+    snapshot_epoch: u64,
+    current_epoch: u64,
+) -> bool {
+    snapshot_epoch == current_epoch
+        && index.active.as_deref() == Some(account_id)
+        && index
+            .accounts
+            .iter()
+            .any(|account| account.id == account_id)
 }
 
 /// Serializes read-modify-write cycles on the active cookie jar.
@@ -1655,16 +1963,30 @@ struct RefreshGuard(tokio::sync::Mutex<()>);
 async fn merge_response_cookies(
     app: tauri::AppHandle,
     lock: tauri::State<'_, JarWriteLock>,
+    session: tauri::State<'_, AccountSessionGuard>,
     host: String,
     set_cookies: Vec<String>,
+    #[allow(non_snake_case)] accountId: Option<String>,
+    epoch: u64,
 ) -> Result<bool, String> {
     if set_cookies.is_empty() {
         return Ok(false);
     }
     let _guard = lock.0.lock().await;
-    let Some(path) = active_cookies_path(&app).await else {
+    let _session = session.mutation.lock().await;
+    let Some(account_id) = accountId else {
         return Ok(false);
     };
+    let idx = read_index(&app).await;
+    if !auth_snapshot_is_current(
+        &idx,
+        &account_id,
+        epoch,
+        session.epoch.load(Ordering::Acquire),
+    ) {
+        return Ok(false);
+    }
+    let path = account_cookies_path(&app, &account_id);
     let Ok(encrypted) = tokio::fs::read(&path).await else {
         return Ok(false);
     };
@@ -1711,16 +2033,19 @@ async fn merge_response_cookies(
 const SETTINGS_STORE_FILE: &str = "settings.json";
 const CACHE_DIR_KEY: &str = "cacheDir";
 
-/// The cache root this process actually started with (managed state,
-/// set in `setup`). All track/cover cache paths derive from it so the
-/// commands and the running stream server always agree, even when the
-/// stored preference already points somewhere new.
+/// The durable offline-media root this process actually started with. Covers
+/// deliberately do not derive from it: they remain disposable OS cache data.
 struct ActiveCacheRoot(PathBuf);
 
 fn default_cache_root(app: &tauri::AppHandle) -> PathBuf {
     app.path()
-        .app_cache_dir()
+        .app_data_dir()
+        .map(|path| path.join("offline-media"))
         .unwrap_or_else(|_| std::env::temp_dir())
+}
+
+fn legacy_cache_root(app: &tauri::AppHandle) -> Option<PathBuf> {
+    app.path().app_cache_dir().ok()
 }
 
 /// User-chosen cache root from the settings store, if any.
@@ -1738,6 +2063,84 @@ fn stored_cache_root(app: &tauri::AppHandle) -> Option<PathBuf> {
 
 fn stream_cache_dir(app: &tauri::AppHandle) -> PathBuf {
     app.state::<ActiveCacheRoot>().0.join("stream")
+}
+
+/// Copy finalized legacy downloads into the durable store without removing or
+/// overwriting either copy. Old cache directories remain recoverable and can
+/// be deleted manually only after the user verifies the imported library.
+async fn import_legacy_offline_files(source: &std::path::Path, target: &std::path::Path) {
+    if source == target || !source.exists() {
+        return;
+    }
+    if let Err(error) = tokio::fs::create_dir_all(target).await {
+        eprintln!("[offline] could not create durable import directory: {error}");
+        return;
+    }
+    let Ok(mut entries) = tokio::fs::read_dir(source).await else {
+        return;
+    };
+    let mut audio_ids = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if let Some(video_id) = name
+            .strip_suffix(".webm")
+            .filter(|id| sanitize_video_id(id))
+        {
+            audio_ids.push(video_id.to_string());
+        }
+    }
+
+    for video_id in audio_ids {
+        let audio_name = format!("{video_id}.webm");
+        let audio_destination = target.join(&audio_name);
+        // Treat an audio file and its sidecars as one ownership unit. A stale
+        // legacy `.invalid` or metadata file must never attach itself to a
+        // newer durable download that already owns this id.
+        if audio_destination.exists() {
+            continue;
+        }
+
+        let audio_candidate = target.join(format!("{audio_name}.importing"));
+        let _ = tokio::fs::remove_file(&audio_candidate).await;
+        if let Err(error) = tokio::fs::copy(source.join(&audio_name), &audio_candidate).await {
+            eprintln!("[offline] could not import legacy file {audio_name}: {error}");
+            continue;
+        }
+
+        let mut sidecar_failed = false;
+        for suffix in [".meta.json", ".invalid"] {
+            let name = format!("{video_id}{suffix}");
+            let from = source.join(&name);
+            let destination = target.join(&name);
+            if !from.exists() || destination.exists() {
+                continue;
+            }
+            let candidate = target.join(format!("{name}.importing"));
+            let _ = tokio::fs::remove_file(&candidate).await;
+            if let Err(error) = tokio::fs::copy(&from, &candidate).await {
+                eprintln!("[offline] could not import legacy sidecar {name}: {error}");
+                sidecar_failed = true;
+                let _ = tokio::fs::remove_file(&candidate).await;
+                break;
+            }
+            if let Err(error) = tokio::fs::rename(&candidate, &destination).await {
+                eprintln!("[offline] could not finish legacy sidecar {name}: {error}");
+                sidecar_failed = true;
+                let _ = tokio::fs::remove_file(&candidate).await;
+                break;
+            }
+        }
+        if sidecar_failed {
+            let _ = tokio::fs::remove_file(&audio_candidate).await;
+            continue;
+        }
+        if let Err(error) = tokio::fs::rename(&audio_candidate, &audio_destination).await {
+            let _ = tokio::fs::remove_file(&audio_candidate).await;
+            eprintln!("[offline] could not finish legacy import for {audio_name}: {error}");
+        }
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -1832,17 +2235,38 @@ struct CacheEntry {
     /// Display artist string (already joined), if known.
     #[serde(skip_serializing_if = "Option::is_none")]
     artist: Option<String>,
+    /// Queue/library identity. This can differ from `video_id` when the user
+    /// downloaded the music-video source for a song card.
+    #[serde(rename = "displayVideoId", skip_serializing_if = "Option::is_none")]
+    display_video_id: Option<String>,
+    #[serde(rename = "sourceKind", skip_serializing_if = "Option::is_none")]
+    source_kind: Option<String>,
+    /// Invalid legacy files stay visible for repair/removal but are never
+    /// claimed as playable or silently deleted.
+    valid: bool,
 }
 
 /// On-disk sidecar written next to a cached `<id>.webm` as
 /// `<id>.meta.json`. The Rust side stores it verbatim; the frontend
 /// supplies the already-formatted display strings.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct TrackMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     artist: Option<String>,
+    #[serde(
+        rename = "displayVideoId",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    display_video_id: Option<String>,
+    #[serde(
+        rename = "sourceKind",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    source_kind: Option<String>,
 }
 
 /// Best-effort read of a track's metadata sidecar. Any absence or parse
@@ -1854,12 +2278,25 @@ async fn read_track_meta(dir: &std::path::Path, video_id: &str) -> TrackMeta {
         Ok(bytes) => serde_json::from_slice::<TrackMeta>(&bytes).unwrap_or(TrackMeta {
             title: None,
             artist: None,
+            display_video_id: None,
+            source_kind: None,
         }),
         Err(_) => TrackMeta {
             title: None,
             artist: None,
+            display_video_id: None,
+            source_kind: None,
         },
     }
+}
+
+fn offline_invalid_marker(dir: &std::path::Path, video_id: &str) -> PathBuf {
+    dir.join(format!("{video_id}.invalid"))
+}
+
+async fn is_playable_offline_audio(dir: &std::path::Path, video_id: &str) -> bool {
+    !offline_invalid_marker(dir, video_id).exists()
+        && is_valid_cached_audio(&dir.join(format!("{video_id}.webm"))).await
 }
 
 /// List every finalized track (.webm) currently in the stream cache.
@@ -1894,254 +2331,226 @@ async fn list_cache(app: tauri::AppHandle) -> Result<Vec<CacheEntry>, String> {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let sidecar = read_track_meta(&dir, video_id).await;
+        let valid = is_playable_offline_audio(&dir, video_id).await;
         entries.push(CacheEntry {
             video_id: video_id.to_string(),
             size: meta.len(),
             modified_secs,
             title: sidecar.title,
             artist: sidecar.artist,
+            display_video_id: sidecar.display_video_id,
+            source_kind: sidecar.source_kind,
+            valid,
         });
     }
     Ok(entries)
 }
 
-/// Delete specific cached tracks. Passing an empty vec wipes the
-/// entire stream cache directory. Returns the total bytes freed.
+/// Delete an explicit set of downloaded tracks. Empty input is rejected so a
+/// serialization/UI bug can never be interpreted as a destructive wipe-all.
 #[tauri::command]
 async fn delete_cache_entries(
     app: tauri::AppHandle,
+    state: tauri::State<'_, StreamServerState>,
     video_ids: Vec<String>,
 ) -> Result<u64, String> {
+    if video_ids.is_empty() {
+        return Err("no downloaded tracks were selected".into());
+    }
     let dir = stream_cache_dir(&app);
     if !dir.exists() {
         return Ok(0);
     }
     let mut freed: u64 = 0;
 
-    let targets: Vec<String> = if video_ids.is_empty() {
-        // "Clear all" — enumerate on the fly. Strip whichever suffix a
-        // file carries so orphaned sidecars / stray .part files (whose
-        // .webm is already gone) get swept too, not just live tracks.
-        let mut rd = tokio::fs::read_dir(&dir)
-            .await
-            .map_err(|e| format!("read_dir: {e}"))?;
-        let mut out = std::collections::HashSet::new();
-        while let Ok(Some(e)) = rd.next_entry().await {
-            if let Some(name) = e.file_name().to_str() {
-                let id = name
-                    .strip_suffix(".webm")
-                    .or_else(|| name.strip_suffix(".meta.json"))
-                    .or_else(|| name.strip_suffix(".part"));
-                if let Some(id) = id {
-                    if sanitize_video_id(id) {
-                        out.insert(id.to_string());
-                    }
-                }
-            }
-        }
-        out.into_iter().collect()
+    let targets: Vec<String> = video_ids
+        .into_iter()
+        .filter(|id| sanitize_video_id(id))
+        .collect();
+    if targets.is_empty() {
+        return Err("no valid downloaded tracks were selected".into());
+    }
+    // Serialize the active-map check with both new download registration and
+    // the filesystem mutation. Otherwise a download could start in the gap
+    // after this check and have its fresh `.part` file deleted underneath it.
+    let runtime = state.runtime.lock().await.clone();
+    let _file_guard = if let Some(runtime) = runtime.as_ref() {
+        Some(runtime.offline_file_ops.lock().await)
     } else {
-        video_ids
-            .into_iter()
-            .filter(|id| sanitize_video_id(id))
-            .collect()
+        None
     };
+    if let Some(runtime) = runtime.as_ref() {
+        let active = runtime.downloads.lock().await;
+        if let Some(video_id) = targets
+            .iter()
+            .find(|video_id| active.contains_key(*video_id))
+        {
+            return Err(format!(
+                "{video_id} is still downloading; cancel it before deleting the file"
+            ));
+        }
+    }
 
+    let mut errors = Vec::new();
     for id in targets {
         let path = dir.join(format!("{id}.webm"));
-        if let Ok(meta) = tokio::fs::metadata(&path).await {
-            freed += meta.len();
+        let size = tokio::fs::metadata(&path)
+            .await
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => freed += size,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => errors.push(format!("{}: {error}", path.display())),
         }
-        let _ = tokio::fs::remove_file(&path).await;
-        // Stray .part file from a crashed download, if any.
-        let _ = tokio::fs::remove_file(dir.join(format!("{id}.part"))).await;
-        // Metadata sidecar, if one was written.
-        let _ = tokio::fs::remove_file(dir.join(format!("{id}.meta.json"))).await;
+        for suffix in [
+            ".part",
+            ".webm.backup",
+            ".meta.json",
+            ".meta.json.part",
+            ".invalid",
+        ] {
+            let extra = dir.join(format!("{id}{suffix}"));
+            match tokio::fs::remove_file(&extra).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => errors.push(format!("{}: {error}", extra.display())),
+            }
+        }
     }
-    Ok(freed)
+    if errors.is_empty() {
+        Ok(freed)
+    } else {
+        Err(format!(
+            "some cache files could not be removed: {}",
+            errors.join("; ")
+        ))
+    }
 }
 
-/// Persist a cached track's display metadata to `<id>.meta.json` beside
-/// its `.webm`. Called by the frontend when it streams or prefetches a
-/// track into the persistent (Premium) cache — that's the moment it
-/// knows the title/artist, which `list_cache` cannot derive from the
-/// file alone. Idempotent; an empty title is a no-op.
+/// Remember a decoder failure without deleting or renaming the user's file.
+/// A later explicit playlist retry replaces it atomically and clears the
+/// marker only after the new payload validates and installs successfully.
 #[tauri::command]
-async fn set_cache_meta(
+async fn mark_offline_file_unplayable(
     app: tauri::AppHandle,
+    state: tauri::State<'_, StreamServerState>,
     video_id: String,
-    title: Option<String>,
-    artist: Option<String>,
 ) -> Result<(), String> {
     if !sanitize_video_id(&video_id) {
-        return Err(format!("invalid videoId: {video_id}"));
+        return Err("invalid videoId".into());
     }
-    let title = title.filter(|s| !s.trim().is_empty());
-    // Nothing worth writing — skip rather than leave an empty sidecar.
-    if title.is_none() {
-        return Ok(());
+    let runtime = state.runtime.lock().await.clone();
+    let _file_guard = if let Some(runtime) = runtime.as_ref() {
+        Some(runtime.offline_file_ops.lock().await)
+    } else {
+        None
+    };
+    if let Some(runtime) = runtime.as_ref() {
+        if runtime.downloads.lock().await.contains_key(&video_id) {
+            return Err("the offline file is currently being repaired".into());
+        }
     }
     let dir = stream_cache_dir(&app);
-    if let Err(e) = tokio::fs::create_dir_all(&dir).await {
-        return Err(format!("create_dir_all: {e}"));
-    }
-    let meta = TrackMeta {
-        title,
-        artist: artist.filter(|s| !s.trim().is_empty()),
-    };
-    let bytes = serde_json::to_vec(&meta).map_err(|e| format!("serialize: {e}"))?;
-    let path = dir.join(format!("{video_id}.meta.json"));
-    tokio::fs::write(&path, bytes)
+    tokio::fs::create_dir_all(&dir)
         .await
-        .map_err(|e| format!("write: {e}"))?;
-    Ok(())
+        .map_err(|error| format!("create offline directory: {error}"))?;
+    tokio::fs::write(offline_invalid_marker(&dir, &video_id), b"unplayable")
+        .await
+        .map_err(|error| format!("mark offline file for repair: {error}"))
 }
 
-/// Make the managed yt-dlp binary available (download on first run,
-/// throttled self-update after). Invoked by the frontend on mount so
-/// the `ytdlp-state` event listener is guaranteed to exist before any
-/// state event fires; also serves as the retry path after a failed
-/// download. Idempotent — see `ytdlp::ensure`.
+/// Make the managed yt-dlp binary available (download on first use,
+/// throttled self-update after). Ordinary playback never calls this command;
+/// it is only the explicit offline-playlist setup retry path. Idempotent —
+/// see `ytdlp::ensure`.
 #[tauri::command]
 async fn ensure_ytdlp(app: tauri::AppHandle) {
     ytdlp::ensure(app).await;
 }
 
-/// Run yt-dlp to resolve a videoId into metadata JSON.
-#[tauri::command]
-fn resolve_stream_ytdlp(app: tauri::AppHandle, video_id: String) -> Result<String, String> {
-    if !sanitize_video_id(&video_id) {
-        return Err(format!("invalid videoId: {video_id}"));
-    }
-    let url = format!("https://www.youtube.com/watch?v={video_id}");
-    let managed = ytdlp::managed_path(&app);
-    let mut command = std::process::Command::new(ytdlp::program(&managed));
-    command.args(["-j", "-f", "bestaudio", "--no-playlist", "--no-warnings"]);
-    let provider = pot_provider::current_config();
-    command.args(ytdlp::youtube_runtime_args(
-        &managed,
-        provider
-            .as_ref()
-            .map(|config| (config.plugin_dir.as_path(), config.base_url.as_str())),
-    ));
-    command.arg(&url);
-    // Windows: a console-less GUI process spawning the console-subsystem
-    // yt-dlp.exe with default flags makes Windows flash a console window
-    // on every resolve. CREATE_NO_WINDOW suppresses it.
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    }
-    let output = command.output().map_err(|e| format!("spawn yt-dlp: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "yt-dlp exit {}: {}",
-            output.status,
-            stderr.chars().take(400).collect::<String>()
-        ));
-    }
-    String::from_utf8(output.stdout).map_err(|e| format!("stdout not utf8: {e}"))
+/// Lifecycle of one explicit offline playlist-track download. yt-dlp writes
+/// into a `<videoId>.part` file and only replaces `<videoId>.webm` after the
+/// payload passes validation. Ordinary playback never creates this state.
+struct DownloadState {
+    /// Wakes long-running setup/read operations when cancellation is requested.
+    notify: Arc<Notify>,
+    video_id: String,
+    downloaded_bytes: AtomicU64,
+    cancelled: AtomicBool,
+    metadata: Option<TrackMeta>,
 }
 
-/// Lifecycle of a single track's yt-dlp download. yt-dlp writes
-/// bytes into a `<videoId>.part` file which is renamed to
-/// `<videoId>.webm` on successful completion; stream handlers block on
-/// `notify` until `complete` flips.
-struct DownloadState {
-    complete: Arc<AtomicBool>,
-    notify: Arc<Notify>,
-    /// Human-readable resolver failure captured from yt-dlp's stderr. The
-    /// frontend preflights the local URL and can surface this instead of the
-    /// browser's opaque "no supported source" message.
-    error: Arc<Mutex<Option<String>>>,
+impl DownloadState {
+    fn new_offline(video_id: String, metadata: TrackMeta) -> Self {
+        Self {
+            notify: Arc::new(Notify::new()),
+            video_id,
+            downloaded_bytes: AtomicU64::new(0),
+            cancelled: AtomicBool::new(false),
+            metadata: Some(metadata),
+        }
+    }
 }
+
+async fn write_track_meta_file(
+    dir: &std::path::Path,
+    video_id: &str,
+    meta: &TrackMeta,
+) -> Result<(), String> {
+    tokio::fs::create_dir_all(dir)
+        .await
+        .map_err(|error| format!("create cache directory: {error}"))?;
+    let bytes = serde_json::to_vec(meta).map_err(|error| format!("serialize: {error}"))?;
+    let path = dir.join(format!("{video_id}.meta.json"));
+    let part = dir.join(format!("{video_id}.meta.json.part"));
+    tokio::fs::write(&part, bytes)
+        .await
+        .map_err(|error| format!("write metadata: {error}"))?;
+    if path.exists() {
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+    tokio::fs::rename(&part, &path)
+        .await
+        .map_err(|error| format!("install metadata: {error}"))
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OfflineDownloadSnapshot {
+    video_id: String,
+    phase: String,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    error: Option<String>,
+}
+
+type OfflineDownloadJobs = Arc<Mutex<HashMap<String, OfflineDownloadSnapshot>>>;
 
 type DownloadMap = Arc<Mutex<HashMap<String, Arc<DownloadState>>>>;
 
-// NB: `cookies.enc` is read only by the InnerTube pipeline (library,
-// search, liked songs). We deliberately do NOT forward cookies to
-// yt-dlp: YouTube's bot-detection treats any authenticated yt-dlp
-// request as a bot and strips every real audio format, leaving only
-// storyboard thumbnails — so anonymous streaming via the android_vr/
-// ios/mweb clients actually works better than authenticated streaming.
+// Account cookies stay exclusive to the signed-in InnerTube/WebPlayer
+// profile. Explicit offline downloads are anonymous and never pass cookies
+// to yt-dlp or the PO-token provider.
 #[derive(Clone)]
 struct StreamServer {
     app: tauri::AppHandle,
-    /// Persistent cache. Tracks land here for Premium-authenticated
-    /// users and stay across app restarts.
+    /// Explicit Premium playlist downloads live here across app restarts.
     cache_dir: PathBuf,
-    /// Session-only cache for anonymous / Free users. Wiped on every
-    /// app startup (see `start_stream_server`) so a non-Premium session
-    /// never accumulates a track library on disk. The `download` map
-    /// keys are prefixed (`e:` vs `p:`) so the same videoId can be
-    /// in-flight independently for the two modes.
-    ephemeral_dir: PathBuf,
     cover_dir: PathBuf,
     downloads: DownloadMap,
+    /// Serializes delete/invalid-marker writes with download registration so
+    /// a new transfer cannot appear between a safety check and a file change.
+    offline_file_ops: Arc<Mutex<()>>,
     /// Expected location of the managed yt-dlp copy. Resolution to an
     /// actual program (managed vs PATH fallback) happens per-spawn via
     /// `ytdlp::program` so a mid-session download takes effect
     /// immediately.
     ytdlp_bin: PathBuf,
-    /// Caps combined on-demand + prefetch yt-dlp concurrency. Without this,
-    /// a burst of rapid track skips or prefetch spawns can fire many yt-dlp
-    /// processes against YouTube from one IP at once, which accelerates
-    /// soft-throttling. See `spawn_downloader`.
+    /// Serializes explicit playlist downloads so one playlist cannot fan out
+    /// multiple yt-dlp processes from the same IP.
     limiter: Arc<Semaphore>,
-}
-
-/// Read the `ephemeral` query flag from a stream/prefetch request.
-/// True when `?ephemeral=1` (or `=true`) appears — used to route the
-/// download to `ephemeral_dir` instead of the persistent cache.
-fn is_ephemeral(req: &Request) -> bool {
-    let Some(query) = req.uri().query() else {
-        return false;
-    };
-    query.split('&').any(|kv| {
-        let mut it = kv.splitn(2, '=');
-        let key = it.next().unwrap_or("");
-        let val = it.next().unwrap_or("");
-        key == "ephemeral" && (val == "1" || val == "true")
-    })
-}
-
-fn requests_stream_refresh(req: &Request) -> bool {
-    let Some(query) = req.uri().query() else {
-        return false;
-    };
-    query.split('&').any(|kv| {
-        let mut it = kv.splitn(2, '=');
-        let key = it.next().unwrap_or("");
-        let val = it.next().unwrap_or("");
-        key == "refresh" && (val == "1" || val == "true")
-    })
-}
-
-fn stream_location_without_refresh(req: &Request) -> String {
-    // `Router::nest` rewrites Request::uri() before the inner handler runs.
-    // OriginalUri retains the unguessable stream-token prefix, which must stay
-    // in the redirect target or the refresh request falls through to a 404.
-    let uri = req
-        .extensions()
-        .get::<axum::extract::OriginalUri>()
-        .map(|original| &original.0)
-        .unwrap_or_else(|| req.uri());
-    let mut location = uri.path().to_string();
-    let retained = uri
-        .query()
-        .into_iter()
-        .flat_map(|query| query.split('&'))
-        .filter(|part| part.split('=').next() != Some("refresh"))
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("&");
-    if !retained.is_empty() {
-        location.push('?');
-        location.push_str(&retained);
-    }
-    location
+    offline_jobs: OfflineDownloadJobs,
 }
 
 /// Hash a URL into a stable hex filename. Uses Rust's stdlib
@@ -2163,7 +2572,10 @@ fn url_to_filename(url: &str) -> String {
 }
 
 fn cover_cache_dir(app: &tauri::AppHandle) -> PathBuf {
-    app.state::<ActiveCacheRoot>().0.join("covers")
+    app.path()
+        .app_cache_dir()
+        .unwrap_or_else(|_| std::env::temp_dir())
+        .join("covers")
 }
 
 /// Download a cover image (typically from iTunes / mzstatic) and stash
@@ -2313,12 +2725,147 @@ async fn clear_cover_cache(app: tauri::AppHandle) -> Result<u64, String> {
 #[derive(Default)]
 struct StreamServerState {
     port: Arc<Mutex<Option<u16>>>,
-    /// Per-launch secret used as a path prefix on every stream/prefetch/
+    /// Per-launch secret used as a path prefix on every offline-audio and
     /// cover URL. The frontend gets it baked into the base URL, so it's
     /// transparent to the webview; a web page in the user's browser that
     /// guesses the random port still can't form a valid URL — this closes
     /// the CSRF-spawn and DNS-rebinding-read vectors.
     token: Arc<Mutex<Option<String>>>,
+    /// Separate per-launch secret exposed only to the remote YouTube Music
+    /// observer. It must never share the stream token: page JavaScript needs
+    /// permission to report state, not permission to inspect cached covers or
+    /// read local audio.
+    web_player_token: Arc<Mutex<Option<String>>>,
+    runtime: Arc<Mutex<Option<StreamServer>>>,
+    offline_jobs: OfflineDownloadJobs,
+}
+
+async fn publish_offline_download(
+    srv: &StreamServer,
+    state: &DownloadState,
+    phase: &str,
+    error: Option<String>,
+) -> OfflineDownloadSnapshot {
+    let snapshot = OfflineDownloadSnapshot {
+        video_id: state.video_id.clone(),
+        phase: phase.to_string(),
+        downloaded_bytes: state.downloaded_bytes.load(Ordering::Relaxed),
+        total_bytes: None,
+        error: error.map(|value| value.chars().take(600).collect()),
+    };
+    srv.offline_jobs
+        .lock()
+        .await
+        .insert(snapshot.video_id.clone(), snapshot.clone());
+    let _ = srv.app.emit("offline-download-state", &snapshot);
+    snapshot
+}
+
+#[tauri::command]
+async fn start_offline_download(
+    state: tauri::State<'_, StreamServerState>,
+    video_id: String,
+    force: Option<bool>,
+    title: Option<String>,
+    artist: Option<String>,
+    display_video_id: Option<String>,
+    source_kind: Option<String>,
+) -> Result<OfflineDownloadSnapshot, String> {
+    if !sanitize_video_id(&video_id) {
+        return Err("invalid videoId".into());
+    }
+    let srv = state
+        .runtime
+        .lock()
+        .await
+        .clone()
+        .ok_or_else(|| "download engine is not ready".to_string())?;
+    let metadata = TrackMeta {
+        title: title.filter(|value| !value.trim().is_empty()),
+        artist: artist.filter(|value| !value.trim().is_empty()),
+        display_video_id: display_video_id.filter(|id| sanitize_video_id(id)),
+        source_kind: source_kind.filter(|kind| kind == "song" || kind == "video"),
+    };
+    let file_guard = srv.offline_file_ops.lock().await;
+    let final_path = srv.cache_dir.join(format!("{video_id}.webm"));
+    let force = force.unwrap_or(false);
+    if !force && is_playable_offline_audio(&srv.cache_dir, &video_id).await {
+        if metadata.title.is_some() {
+            write_track_meta_file(&srv.cache_dir, &video_id, &metadata).await?;
+        }
+        let existing = DownloadState::new_offline(video_id, metadata);
+        existing.downloaded_bytes.store(
+            tokio::fs::metadata(&final_path)
+                .await
+                .map(|metadata| metadata.len())
+                .unwrap_or(0),
+            Ordering::Relaxed,
+        );
+        return Ok(publish_offline_download(&srv, &existing, "completed", None).await);
+    }
+    if let Some(remaining) = offline_download_cooldown_remaining(&srv.app) {
+        return Err(offline_download_cooldown_message(remaining));
+    }
+
+    let mut was_created = false;
+    let download = {
+        let mut downloads = srv.downloads.lock().await;
+        if let Some(existing) = downloads.get(&video_id) {
+            existing.clone()
+        } else {
+            let download = Arc::new(DownloadState::new_offline(
+                video_id.clone(),
+                metadata.clone(),
+            ));
+            downloads.insert(video_id.clone(), download.clone());
+            was_created = true;
+            download
+        }
+    };
+    drop(file_guard);
+    let snapshot = publish_offline_download(
+        &srv,
+        &download,
+        if was_created { "queued" } else { "downloading" },
+        None,
+    )
+    .await;
+    if was_created {
+        spawn_downloader(video_id, srv.clone(), download);
+    }
+    Ok(snapshot)
+}
+
+#[tauri::command]
+async fn cancel_offline_download(
+    state: tauri::State<'_, StreamServerState>,
+    video_id: String,
+) -> Result<(), String> {
+    if !sanitize_video_id(&video_id) {
+        return Err("invalid videoId".into());
+    }
+    let srv = state
+        .runtime
+        .lock()
+        .await
+        .clone()
+        .ok_or_else(|| "download engine is not ready".to_string())?;
+    let download = srv.downloads.lock().await.get(&video_id).cloned();
+    if let Some(download) = download {
+        download.cancelled.store(true, Ordering::Release);
+        // `notify_one` stores a permit when cancellation lands between the
+        // atomic check and `notified()` registration; `notify_waiters` would
+        // lose that wake-up and could leave setup/read blocked until timeout.
+        download.notify.notify_one();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn list_offline_downloads(
+    state: tauri::State<'_, StreamServerState>,
+) -> Result<Vec<OfflineDownloadSnapshot>, String> {
+    Ok(state.offline_jobs.lock().await.values().cloned().collect())
 }
 
 #[tauri::command]
@@ -2331,21 +2878,205 @@ async fn get_stream_base_url(state: tauri::State<'_, StreamServerState>) -> Resu
     }
 }
 
-/// Spawn a yt-dlp downloader that writes into the shared memory buffer
-/// AND to a `<videoId>.part` file on disk. On successful exit, renames
-/// .part → .webm. Updates `state.complete` + pings `notify` on every
-/// new chunk.
-///
-/// `target_dir` selects which on-disk pool to write to (persistent or
-/// ephemeral). `map_key` is the prefixed key in `srv.downloads` so a
-/// single videoId can be in-flight independently for both pools.
-///
-/// `is_prefetch` gates how the download waits for a `srv.limiter` slot:
-/// on-demand (`/stream`) waits for one to free up, since the user is
-/// actively waiting on it; prefetch (`/prefetch`) only takes a slot if one
-/// is immediately free and otherwise bails without spawning yt-dlp at all —
-/// prefetch is best-effort, and a skipped prefetch is resolved by the
-/// on-demand request that follows it.
+async fn wait_for_web_player_bridge(state: &StreamServerState) -> Result<(u16, String), String> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let port = *state.port.lock().await;
+        let token = state.web_player_token.lock().await.clone();
+        if let (Some(port), Some(token)) = (port, token) {
+            return Ok((port, token));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err("playback bridge did not become ready".into());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+fn requests_cache_only(req: &Request) -> bool {
+    let Some(query) = req.uri().query() else {
+        return false;
+    };
+    query.split('&').any(|kv| {
+        let mut it = kv.splitn(2, '=');
+        let key = it.next().unwrap_or("");
+        let val = it.next().unwrap_or("");
+        key == "cache_only" && (val == "1" || val == "true")
+    })
+}
+
+#[tauri::command]
+async fn web_player_load(
+    app: tauri::AppHandle,
+    player: tauri::State<'_, web_player::WebPlayerState>,
+    server: tauri::State<'_, StreamServerState>,
+    session: tauri::State<'_, AccountSessionGuard>,
+    refresh_guard: tauri::State<'_, RefreshGuard>,
+    video_id: String,
+    generation: u64,
+    playing: bool,
+    volume: f64,
+    muted: bool,
+) -> Result<(), String> {
+    if !sanitize_video_id(&video_id) || !volume.is_finite() {
+        return Err("invalid web player request".into());
+    }
+    // setup() performs account migrations before binding the loopback bridge.
+    // A restored queue can reach this command during that short cold-start
+    // window, so await readiness instead of consuming both frontend retries.
+    let (port, web_player_token) = wait_for_web_player_bridge(server.inner()).await?;
+    let bridge_url = format!("http://127.0.0.1:{port}/{web_player_token}/web-player/state");
+    // Hold the account identity stable through profile selection and player
+    // creation. A concurrent account/channel switch will wait, then reset this
+    // owner before committing its new index snapshot.
+    let _account_lock = session.mutation.lock().await;
+    // Player creation and cookie-snapshot refresh both operate on the active
+    // account WebView profile. Serialize them so a keeper cannot reload or
+    // close while a playback handoff is in flight.
+    let _profile_lock = refresh_guard.inner().0.lock().await;
+    let index = read_index(&app).await;
+    let (profile_key, profile_dir) = if let Some(active) = index.active {
+        let account = index
+            .accounts
+            .iter()
+            .find(|account| account.id == active)
+            .ok_or_else(|| "active account profile is unavailable".to_string())?;
+        if account.web_player_identity_verified == Some(false)
+            || (account.page_id.is_some() && account.web_player_identity_verified != Some(true))
+        {
+            return Err("choose this account's YouTube channel before playback".into());
+        }
+        (
+            format!("account:{active}"),
+            account_webview_dir(&app, &active),
+        )
+    } else {
+        let dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|error| error.to_string())?
+            .join("playback-guest-webview");
+        ("guest".to_string(), dir)
+    };
+    web_player::load(
+        &app,
+        player.inner(),
+        bridge_url,
+        profile_key,
+        profile_dir,
+        YT_LOGIN_UA,
+        YT_WEBVIEW_ARGS,
+        video_id,
+        generation,
+        playing,
+        volume,
+        muted,
+    )
+    .await
+}
+
+#[tauri::command]
+async fn web_player_control(
+    app: tauri::AppHandle,
+    player: tauri::State<'_, web_player::WebPlayerState>,
+    generation: u64,
+    action: String,
+    value: Option<f64>,
+) -> Result<(), String> {
+    if value.is_some_and(|value| !value.is_finite()) {
+        return Err("invalid web player value".into());
+    }
+    web_player::control(&app, player.inner(), generation, &action, value).await
+}
+
+#[tauri::command]
+async fn web_player_reset(
+    app: tauri::AppHandle,
+    player: tauri::State<'_, web_player::WebPlayerState>,
+) -> Result<(), String> {
+    web_player::reset(&app, player.inner()).await
+}
+
+#[tauri::command]
+async fn web_player_health(
+    app: tauri::AppHandle,
+    player: tauri::State<'_, web_player::WebPlayerState>,
+) -> Result<bool, String> {
+    Ok(web_player::healthy(&app, player.inner()).await)
+}
+
+const OFFLINE_DOWNLOAD_COOLDOWN_KEY: &str = "offlineDownloadCooldownUntil";
+const OFFLINE_DOWNLOAD_COOLDOWN: Duration = Duration::from_secs(15 * 60);
+const YTDLP_OFFLINE_RETRY_ARGS: [&str; 4] = ["--retries", "0", "--extractor-retries", "0"];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum YtdlpFailureKind {
+    RateLimited,
+    Other,
+}
+
+/// Classify the unredacted diagnostic bytes before constructing a safe error
+/// message. Some yt-dlp errors put the bot-check text and a help URL on the
+/// same line; the display redactor intentionally drops that whole line.
+fn classify_ytdlp_failure(stderr: &[u8]) -> YtdlpFailureKind {
+    let lower = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    if lower.contains("429")
+        || lower.contains("too many requests")
+        || lower.contains("not a bot")
+        || lower.contains("rate limit")
+    {
+        YtdlpFailureKind::RateLimited
+    } else {
+        YtdlpFailureKind::Other
+    }
+}
+
+fn unix_now_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn cooldown_remaining_at(until: u64, now: u64) -> Option<u64> {
+    (until > now).then(|| until - now)
+}
+
+/// The Tauri store lives under app data, independently of the user-selected
+/// offline-media directory. Keeping the deadline there prevents a cache-path
+/// change or app restart from immediately retrying a rate-limited IP.
+fn offline_download_cooldown_remaining(app: &tauri::AppHandle) -> Option<u64> {
+    use tauri_plugin_store::StoreExt;
+    let store = app.store(SETTINGS_STORE_FILE).ok()?;
+    let until = store.get(OFFLINE_DOWNLOAD_COOLDOWN_KEY)?.as_u64()?;
+    cooldown_remaining_at(until, unix_now_seconds())
+}
+
+fn persist_offline_download_cooldown(app: &tauri::AppHandle) -> Result<u64, String> {
+    use tauri_plugin_store::StoreExt;
+    let until = unix_now_seconds().saturating_add(OFFLINE_DOWNLOAD_COOLDOWN.as_secs());
+    let store = app
+        .store(SETTINGS_STORE_FILE)
+        .map_err(|error| format!("open native settings store: {error}"))?;
+    store.set(
+        OFFLINE_DOWNLOAD_COOLDOWN_KEY,
+        serde_json::Value::from(until),
+    );
+    store
+        .save()
+        .map_err(|error| format!("save native settings store: {error}"))?;
+    Ok(until)
+}
+
+fn offline_download_cooldown_message(remaining_seconds: u64) -> String {
+    let minutes = remaining_seconds.saturating_add(59) / 60;
+    format!(
+        "YouTube temporarily rate limited offline downloads. Try again in {minutes} minute{}.",
+        if minutes == 1 { "" } else { "s" }
+    )
+}
+
+/// Reduce yt-dlp/provider diagnostics to an actionable, credential-free tail.
 fn summarize_ytdlp_stderr(stderr: &[u8]) -> String {
     let text = String::from_utf8_lossy(stderr);
     let mut lines = text
@@ -2361,6 +3092,13 @@ fn summarize_ytdlp_stderr(stderr: &[u8]) -> String {
                 && !lower.contains("visitor_data")
                 && !lower.contains("po_token")
                 && !lower.contains("request body")
+                && !lower.contains("googlevideo.com")
+                && !lower.contains("http://")
+                && !lower.contains("https://")
+                && !lower.contains("token=")
+                && !lower.contains("pot=")
+                && !lower.contains("authorization:")
+                && !lower.contains("cookie:")
         })
         .collect::<Vec<_>>();
     // The actionable extractor/download error is conventionally last. Keep a
@@ -2376,285 +3114,646 @@ fn summarize_ytdlp_stderr(stderr: &[u8]) -> String {
     }
 }
 
-/// Preserve actionable YouTube failures as distinct HTTP statuses so the
-/// frontend can avoid immediately repeating a request that cannot succeed.
-/// Retrying a 429 after a few hundred milliseconds only extends the IP block;
-/// retrying a DRM/format failure runs the same expensive extraction twice.
-fn ytdlp_failure_status(detail: &str) -> StatusCode {
-    let detail = detail.to_ascii_lowercase();
-    if detail.contains("http error 429")
-        || detail.contains("too many requests")
-        || detail.contains("confirm you're not a bot")
-    {
-        StatusCode::TOO_MANY_REQUESTS
-    } else if detail.contains("requested format is not available")
-        || detail.contains("drm protected")
-        || detail.contains("only images are available")
-        || detail.contains("video is not available")
-    {
-        StatusCode::UNPROCESSABLE_ENTITY
-    } else {
-        StatusCode::BAD_GATEWAY
-    }
-}
-
 /// Reject tiny HTML/storyboard/error payloads before they become persistent
 /// cache entries. A real YouTube audio track is comfortably larger than this.
 const MIN_AUDIO_BYTES: u64 = 32 * 1024;
 
-fn spawn_downloader(
-    video_id: String,
-    target_dir: PathBuf,
-    map_key: String,
-    srv: StreamServer,
-    state: Arc<DownloadState>,
-    is_prefetch: bool,
-) {
-    let downloads = srv.downloads.clone();
-    tokio::spawn(async move {
-        // Cap combined on-demand + prefetch yt-dlp concurrency (see
-        // `StreamServer::limiter`) before touching disk or the network, so a
-        // queued prefetch doesn't do anything until it's actually its turn.
-        let _permit = if is_prefetch {
-            match srv.limiter.clone().try_acquire_owned() {
-                Ok(p) => p,
-                Err(_) => {
-                    eprintln!("[stream] prefetch {video_id}: no free slot, skipping");
-                    state.complete.store(true, Ordering::Release);
-                    state.notify.notify_waiters();
-                    downloads.lock().await.remove(&map_key);
-                    return;
+/// Install a fully validated download without exposing or destroying the
+/// previous cache entry first. This matters for old downloads: a failed
+/// refresh must leave the user's existing bytes recoverable.
+async fn install_cached_audio(
+    part_path: &std::path::Path,
+    final_path: &std::path::Path,
+) -> Result<(), String> {
+    if !final_path.exists() {
+        return tokio::fs::rename(part_path, final_path)
+            .await
+            .map_err(|error| error.to_string());
+    }
+
+    let backup_path = final_path.with_extension("webm.backup");
+    if backup_path.exists() {
+        if is_valid_cached_audio(final_path).await {
+            tokio::fs::remove_file(&backup_path)
+                .await
+                .map_err(|error| format!("remove stale cache backup: {error}"))?;
+        } else {
+            tokio::fs::remove_file(final_path)
+                .await
+                .map_err(|error| format!("remove invalid replacement: {error}"))?;
+            tokio::fs::rename(&backup_path, final_path)
+                .await
+                .map_err(|error| format!("restore cache backup: {error}"))?;
+        }
+    }
+
+    tokio::fs::rename(final_path, &backup_path)
+        .await
+        .map_err(|error| format!("stage previous cache entry: {error}"))?;
+    match tokio::fs::rename(part_path, final_path).await {
+        Ok(()) => {
+            let _ = tokio::fs::remove_file(&backup_path).await;
+            Ok(())
+        }
+        Err(error) => {
+            let _ = tokio::fs::rename(&backup_path, final_path).await;
+            Err(format!("install replacement cache entry: {error}"))
+        }
+    }
+}
+
+/// Recover the previous cache entry if the process stopped between staging an
+/// old download as `.webm.backup` and installing its replacement. Valid final
+/// files always win; an invalid or missing final is replaced only when the
+/// backup itself passes the same container/size validation as normal cache
+/// playback. Unknown files are left untouched for manual recovery.
+async fn recover_cache_backups(cache_dir: &std::path::Path) {
+    let Ok(mut entries) = tokio::fs::read_dir(cache_dir).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let backup_path = entry.path();
+        let Some(name) = backup_path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(final_name) = name.strip_suffix(".webm.backup") else {
+            continue;
+        };
+        if !sanitize_video_id(final_name) || !is_valid_cached_audio(&backup_path).await {
+            continue;
+        }
+        let final_path = cache_dir.join(format!("{final_name}.webm"));
+        if is_valid_cached_audio(&final_path).await {
+            let _ = tokio::fs::remove_file(&backup_path).await;
+            continue;
+        }
+        if final_path.exists() {
+            if let Err(error) = tokio::fs::remove_file(&final_path).await {
+                eprintln!("[stream-server] could not remove interrupted replacement {final_name}: {error}");
+                continue;
+            }
+        }
+        if let Err(error) = tokio::fs::rename(&backup_path, &final_path).await {
+            eprintln!("[stream-server] could not restore cache backup {final_name}: {error}");
+        } else {
+            eprintln!("[stream-server] restored interrupted cache backup {final_name}");
+        }
+    }
+}
+
+async fn wait_or_cancel<T>(
+    state: &DownloadState,
+    future: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    if state.cancelled.load(Ordering::Acquire) {
+        return None;
+    }
+    tokio::select! {
+        result = future => Some(result),
+        _ = state.notify.notified() => None,
+    }
+}
+
+#[derive(Debug)]
+enum OfflineDownloadAttempt {
+    Completed,
+    Cancelled,
+    Failed {
+        error: String,
+        kind: YtdlpFailureKind,
+        /// Local filesystem/spawn failures cannot be repaired by restarting
+        /// the PO provider, even if it happened to exit at the same time.
+        provider_retryable: bool,
+    },
+}
+
+fn should_retry_after_provider_failure(
+    provider_was_used: bool,
+    kind: YtdlpFailureKind,
+    provider_retryable: bool,
+    provider_is_healthy: bool,
+) -> bool {
+    provider_was_used
+        && kind != YtdlpFailureKind::RateLimited
+        && provider_retryable
+        && !provider_is_healthy
+}
+
+/// Run exactly one yt-dlp process and atomically install its validated output.
+/// Retry policy stays in `spawn_downloader`; keeping one attempt here ensures
+/// the crash-recovery retry has identical cancellation, progress, diagnostic,
+/// and cache-preservation behavior.
+async fn run_offline_download_attempt(
+    video_id: &str,
+    srv: &StreamServer,
+    state: &DownloadState,
+    ytdlp_program: &std::path::Path,
+    provider: Option<&pot_provider::ProviderConfig>,
+    target_dir: &std::path::Path,
+    part_path: &std::path::Path,
+    final_path: &std::path::Path,
+) -> OfflineDownloadAttempt {
+    let _ = tokio::fs::remove_file(part_path).await;
+    if state.cancelled.load(Ordering::Acquire) {
+        return OfflineDownloadAttempt::Cancelled;
+    }
+
+    let mut file = match tokio::fs::File::create(part_path).await {
+        Ok(file) => file,
+        Err(error) => {
+            let message = format!("could not create offline download file: {error}");
+            eprintln!("[offline] {video_id}: {message}");
+            return OfflineDownloadAttempt::Failed {
+                error: message,
+                kind: YtdlpFailureKind::Other,
+                provider_retryable: false,
+            };
+        }
+    };
+
+    let url = format!("https://www.youtube.com/watch?v={video_id}");
+    let mut cmd = TokioCommand::new(ytdlp_program);
+    // Keep config/plugin isolation first in argv so yt-dlp cannot apply a
+    // user-controlled option before Goosic establishes the hermetic runtime.
+    cmd.args(ytdlp::youtube_runtime_args(
+        &srv.ytdlp_bin,
+        provider.map(|config| (config.plugin_dir.as_path(), config.base_url.as_str())),
+    ));
+    cmd.args([
+        "-f",
+        "bestaudio[ext=webm]/bestaudio",
+        "--no-playlist",
+        "--no-part",
+        "-q",
+        "--socket-timeout",
+        "15",
+        "-o",
+        "-",
+    ]);
+    // Do not let yt-dlp turn one playlist item into an immediate burst of
+    // retries. The explicit UI retry remains available after non-rate-limit
+    // failures; 429/not-a-bot responses activate the durable native cooldown.
+    cmd.args(YTDLP_OFFLINE_RETRY_ARGS);
+    cmd.arg(&url);
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    cmd.kill_on_drop(true);
+    let mut child = match cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            drop(file);
+            let _ = tokio::fs::remove_file(part_path).await;
+            eprintln!("[offline] spawn {video_id}: {error}");
+            return OfflineDownloadAttempt::Failed {
+                error: format!("could not start yt-dlp: {error}"),
+                kind: YtdlpFailureKind::Other,
+                provider_retryable: false,
+            };
+        }
+    };
+
+    let Some(mut stdout) = child.stdout.take() else {
+        let _ = child.start_kill();
+        drop(file);
+        let _ = tokio::fs::remove_file(part_path).await;
+        return OfflineDownloadAttempt::Failed {
+            error: "yt-dlp did not provide an audio pipe".into(),
+            kind: YtdlpFailureKind::Other,
+            provider_retryable: false,
+        };
+    };
+    // Drain stderr concurrently so verbose extractor warnings cannot fill the
+    // pipe and deadlock yt-dlp. Keep a bounded tail for diagnostics.
+    let stderr_task = child.stderr.take().map(|mut stderr| {
+        tokio::spawn(async move {
+            const STDERR_TAIL_BYTES: usize = 64 * 1024;
+            let mut tail = Vec::new();
+            let mut chunk = [0u8; 8192];
+            loop {
+                match stderr.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => {
+                        tail.extend_from_slice(&chunk[..read]);
+                        if tail.len() > STDERR_TAIL_BYTES {
+                            let excess = tail.len() - STDERR_TAIL_BYTES;
+                            tail.drain(..excess);
+                        }
+                    }
                 }
             }
-        } else {
-            srv.limiter.clone().acquire_owned().await.expect(
-                "semaphore never closed: StreamServer's Arc<Semaphore> is never explicitly closed \
-                 and outlives every acquire call",
-            )
+            tail
+        })
+    });
+
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut ok = true;
+    let mut provider_retryable = true;
+    let mut last_progress_emit = std::time::Instant::now();
+    const READ_TIMEOUT: Duration = Duration::from_secs(60);
+    loop {
+        if state.cancelled.load(Ordering::Acquire) {
+            let _ = child.start_kill();
+            ok = false;
+            break;
+        }
+        let read_result = tokio::select! {
+            result = tokio::time::timeout(READ_TIMEOUT, stdout.read(&mut buf)) => Some(result),
+            _ = state.notify.notified() => None,
+        };
+        match read_result {
+            None => {
+                let _ = child.start_kill();
+                ok = false;
+                break;
+            }
+            Some(Err(_)) => {
+                eprintln!("[offline] read timeout for {video_id}; killing yt-dlp");
+                let _ = child.start_kill();
+                ok = false;
+                break;
+            }
+            Some(Ok(Ok(0))) => break,
+            Some(Ok(Ok(read))) => {
+                state
+                    .downloaded_bytes
+                    .fetch_add(read as u64, Ordering::Relaxed);
+                if let Err(error) = file.write_all(&buf[..read]).await {
+                    eprintln!("[offline] write .part: {error}");
+                    let _ = child.start_kill();
+                    ok = false;
+                    provider_retryable = false;
+                    break;
+                }
+                if last_progress_emit.elapsed() >= Duration::from_millis(250) {
+                    let _ = publish_offline_download(srv, state, "downloading", None).await;
+                    last_progress_emit = std::time::Instant::now();
+                }
+            }
+            Some(Ok(Err(error))) => {
+                eprintln!("[offline] read stdout: {error}");
+                ok = false;
+                break;
+            }
+        }
+    }
+    if let Err(error) = file.flush().await {
+        eprintln!("[offline] flush .part: {error}");
+        ok = false;
+        provider_retryable = false;
+    }
+    drop(file);
+
+    let status_result = if state.cancelled.load(Ordering::Acquire) {
+        let _ = child.start_kill();
+        tokio::time::timeout(Duration::from_secs(5), child.wait()).await
+    } else {
+        tokio::select! {
+            result = tokio::time::timeout(Duration::from_secs(15), child.wait()) => result,
+            _ = state.notify.notified() => {
+                let _ = child.start_kill();
+                tokio::time::timeout(Duration::from_secs(5), child.wait()).await
+            }
+        }
+    };
+    if status_result.is_err() {
+        let _ = child.start_kill();
+        ok = false;
+    }
+    let status = status_result.ok().and_then(Result::ok);
+    let stderr = match stderr_task {
+        Some(mut task) => match tokio::time::timeout(Duration::from_secs(5), &mut task).await {
+            Ok(Ok(stderr)) => stderr,
+            _ => {
+                task.abort();
+                Vec::new()
+            }
+        },
+        None => Vec::new(),
+    };
+
+    if state.cancelled.load(Ordering::Acquire) {
+        let _ = tokio::fs::remove_file(part_path).await;
+        return OfflineDownloadAttempt::Cancelled;
+    }
+
+    let success = ok && status.is_some_and(|status| status.success());
+    let part_size = tokio::fs::metadata(part_path)
+        .await
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    let supported_container =
+        part_size >= MIN_AUDIO_BYTES && has_supported_audio_container(part_path).await;
+    let failure_kind = classify_ytdlp_failure(&stderr);
+
+    if success && supported_container {
+        if let Err(error) = install_cached_audio(part_path, final_path).await {
+            eprintln!("[offline] install {video_id}: {error}");
+            let _ = tokio::fs::remove_file(part_path).await;
+            return OfflineDownloadAttempt::Failed {
+                error: format!(
+                    "download finished but the audio cache file could not be installed: {error}"
+                ),
+                kind: YtdlpFailureKind::Other,
+                provider_retryable: false,
+            };
+        }
+
+        let _ = tokio::fs::remove_file(offline_invalid_marker(target_dir, video_id)).await;
+        eprintln!("[offline] downloaded {video_id} ({part_size} bytes)");
+        if let Some(metadata) = state.metadata.as_ref() {
+            if metadata.title.is_some() {
+                if let Err(error) = write_track_meta_file(target_dir, video_id, metadata).await {
+                    eprintln!("[offline] metadata write failed for {video_id}: {error}");
+                }
+            }
+        }
+        return OfflineDownloadAttempt::Completed;
+    }
+
+    let error = if failure_kind == YtdlpFailureKind::RateLimited {
+        offline_download_cooldown_message(OFFLINE_DOWNLOAD_COOLDOWN.as_secs())
+    } else if success && part_size < MIN_AUDIO_BYTES {
+        let detail = format!(
+            "yt-dlp returned only {part_size} bytes (minimum audio size is {MIN_AUDIO_BYTES})"
+        );
+        eprintln!("[offline] download too small for {video_id}: {detail}");
+        detail
+    } else if success {
+        eprintln!("[offline] unsupported audio payload for {video_id}");
+        "yt-dlp returned an unsupported audio container".to_string()
+    } else {
+        let detail = summarize_ytdlp_stderr(&stderr);
+        eprintln!("[offline] download failed {video_id}: {detail}");
+        detail
+    };
+    let _ = tokio::fs::remove_file(part_path).await;
+    OfflineDownloadAttempt::Failed {
+        error,
+        kind: failure_kind,
+        provider_retryable,
+    }
+}
+
+fn spawn_downloader(video_id: String, srv: StreamServer, state: Arc<DownloadState>) {
+    let downloads = srv.downloads.clone();
+    tokio::spawn(async move {
+        let finish = |phase: &'static str, error: Option<String>| {
+            let srv = srv.clone();
+            let state = state.clone();
+            let downloads = downloads.clone();
+            async move {
+                let _ = publish_offline_download(&srv, &state, phase, error).await;
+                let mut active = downloads.lock().await;
+                if active
+                    .get(&state.video_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &state))
+                {
+                    active.remove(&state.video_id);
+                }
+            }
         };
 
-        // AppShell starts managed yt-dlp setup eagerly, but a fast first-run
-        // click can reach this task before the download finishes. Join the
-        // same serialized availability check here instead of spawning a
-        // missing PATH command and turning that race into MEDIA_ERR_SRC_NOT_SUPPORTED.
-        let ytdlp_program = match ytdlp::ensure_ytdlp_available(&srv.app).await {
-            Ok(program) => program,
-            Err(e) => {
-                let message = format!("yt-dlp unavailable: {e}");
-                eprintln!("[stream] {video_id}: {message}");
-                *state.error.lock().await = Some(message);
-                state.complete.store(true, Ordering::Release);
-                state.notify.notify_waiters();
-                downloads.lock().await.remove(&map_key);
+        let _permit = match wait_or_cancel(&state, srv.limiter.clone().acquire_owned()).await {
+            Some(Ok(permit)) => permit,
+            Some(Err(_)) => {
+                finish(
+                    "failed",
+                    Some("offline download queue is unavailable".into()),
+                )
+                .await;
+                return;
+            }
+            None => {
+                finish("cancelled", None).await;
                 return;
             }
         };
-        if let Err(e) = ytdlp::ensure_js_runtime(&srv.ytdlp_bin).await {
+        if state.cancelled.load(Ordering::Acquire) {
+            finish("cancelled", None).await;
+            return;
+        }
+        // A playlist can already have later tracks queued when an earlier
+        // track trips YouTube's rate limit. Re-check after acquiring the
+        // serialized permit so those jobs stop without installing tooling or
+        // sending another network request.
+        if let Some(remaining) = offline_download_cooldown_remaining(&srv.app) {
+            finish("failed", Some(offline_download_cooldown_message(remaining))).await;
+            return;
+        }
+        let _ = publish_offline_download(&srv, &state, "downloading", None).await;
+
+        // Offline tooling is lazy: ordinary playback must never install it.
+        // Surface each first-use phase only after an explicit playlist action,
+        // while this worker joins the same serialized setup locks as retries.
+        let mut setup_announced = false;
+        if !srv.ytdlp_bin.is_file() {
+            ytdlp::emit_state(&srv.app, "downloading", None);
+            setup_announced = true;
+        }
+        let ytdlp_program =
+            match wait_or_cancel(&state, ytdlp::ensure_ytdlp_available(&srv.app)).await {
+                Some(Ok(program)) => program,
+                Some(Err(e)) => {
+                    let message = format!("yt-dlp unavailable: {e}");
+                    eprintln!("[offline] {video_id}: {message}");
+                    if setup_announced {
+                        ytdlp::emit_state(&srv.app, "error", Some(message.clone()));
+                    }
+                    finish("failed", Some(message)).await;
+                    return;
+                }
+                None => {
+                    if setup_announced {
+                        ytdlp::emit_state(&srv.app, "cancelled", None);
+                    }
+                    finish("cancelled", None).await;
+                    return;
+                }
+            };
+        if !ytdlp::managed_deno_path(&srv.ytdlp_bin).is_file() {
+            ytdlp::emit_state(
+                &srv.app,
+                "runtime",
+                Some("Installing YouTube challenge runtime (Deno)".into()),
+            );
+            setup_announced = true;
+        }
+        let runtime_result = wait_or_cancel(&state, ytdlp::ensure_js_runtime(&srv.ytdlp_bin)).await;
+        let Some(runtime_result) = runtime_result else {
+            if setup_announced {
+                ytdlp::emit_state(&srv.app, "cancelled", None);
+            }
+            finish("cancelled", None).await;
+            return;
+        };
+        let mut setup_warning = None;
+        if let Err(e) = runtime_result {
             // Best-effort by contract: android_vr can still resolve many
             // tracks, so an unavailable GitHub/Deno download is not itself a
-            // playback failure. The selected client args below automatically
+            // download failure. The selected client args below automatically
             // omit web_safari when the managed runtime is absent.
-            eprintln!("[stream] {video_id}: Deno unavailable, using fallback clients: {e}");
+            eprintln!("[offline] {video_id}: Deno unavailable, using fallback clients: {e}");
+            setup_warning = Some(
+                "YouTube challenge runtime unavailable; using fallback download clients"
+                    .to_string(),
+            );
         }
-        let provider = match pot_provider::ensure(&srv.app, &srv.ytdlp_bin, false).await {
-            Ok(config) => Some(config),
-            Err(error) => {
+        if ytdlp::managed_deno_path(&srv.ytdlp_bin).is_file()
+            && pot_provider::current_config().is_none()
+        {
+            ytdlp::emit_state(
+                &srv.app,
+                "provider",
+                Some("Installing managed YouTube PO-token provider".into()),
+            );
+            setup_announced = true;
+        }
+        let provider = match wait_or_cancel(
+            &state,
+            pot_provider::ensure(&srv.app, &srv.ytdlp_bin, false),
+        )
+        .await
+        {
+            Some(Ok(config)) => Some(config),
+            Some(Err(error)) => {
                 eprintln!("[pot-provider] unavailable; using fallback clients: {error}");
+                setup_warning =
+                    Some("PO-token provider unavailable; using fallback download clients".into());
                 None
             }
+            None => {
+                if setup_announced {
+                    ytdlp::emit_state(&srv.app, "cancelled", None);
+                }
+                finish("cancelled", None).await;
+                return;
+            }
         };
+        if setup_announced {
+            ytdlp::emit_state(&srv.app, "ready", setup_warning);
+        }
 
-        let url = format!("https://www.youtube.com/watch?v={video_id}");
+        let target_dir = srv.cache_dir.clone();
         let part_path = target_dir.join(format!("{video_id}.part"));
         let final_path = target_dir.join(format!("{video_id}.webm"));
         let _ = tokio::fs::create_dir_all(&target_dir).await;
-        let _ = tokio::fs::remove_file(&part_path).await; // clean stale
-
-        let mut cmd = TokioCommand::new(ytdlp_program);
-        cmd.args([
-            "-f",
-            "bestaudio[ext=webm]/bestaudio",
-            "--no-playlist",
-            "--no-part",
-            "-q",
-            // YouTube regularly hands out a signed media URL that then 403s
-            // on the very first byte-range request (token/pot desync or
-            // per-URL throttling). Left alone this surfaces as a one-off
-            // "download failed" that a manual re-click fixes. A couple of
-            // retries clears most of these inside a single spawn, before the
-            // handler ever returns 502 to the audio element. Kept low
-            // (rather than the more thorough 5/3 this used to be): once
-            // YouTube starts throttling an IP, every failed track was
-            // costing ~15 requests here, which only hastens the block. The
-            // frontend's own single auto-retry (audio-engine.ts) already
-            // covers the common transient case without hammering further.
-            "--retries",
-            "2",
-            "--extractor-retries",
-            "1",
-            "--socket-timeout",
-            "15",
-            "-o",
-            "-",
-        ]);
-        cmd.args(ytdlp::youtube_runtime_args(
-            &srv.ytdlp_bin,
-            provider
-                .as_ref()
-                .map(|config| (config.plugin_dir.as_path(), config.base_url.as_str())),
-        ));
-        cmd.arg(&url);
-        // Windows: suppress the console window for the child yt-dlp.exe
-        // (see resolve_stream_ytdlp for rationale).
-        #[cfg(windows)]
-        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        let mut child = match cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
-            Ok(c) => c,
-            Err(e) => {
-                let message = format!("could not start yt-dlp: {e}");
-                eprintln!("[stream] spawn {video_id}: {e}");
-                *state.error.lock().await = Some(message);
-                state.complete.store(true, Ordering::Release);
-                state.notify.notify_waiters();
-                downloads.lock().await.remove(&map_key);
-                return;
-            }
-        };
-
-        let mut stdout = child.stdout.take().unwrap();
-        // Drain stderr concurrently so verbose extractor warnings cannot fill
-        // the pipe and deadlock yt-dlp. Keep a bounded tail for diagnostics.
-        let stderr_task = child.stderr.take().map(|mut stderr| {
-            tokio::spawn(async move {
-                const STDERR_TAIL_BYTES: usize = 64 * 1024;
-                let mut tail = Vec::new();
-                let mut chunk = [0u8; 8192];
-                loop {
-                    match stderr.read(&mut chunk).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(read) => {
-                            tail.extend_from_slice(&chunk[..read]);
-                            if tail.len() > STDERR_TAIL_BYTES {
-                                let excess = tail.len() - STDERR_TAIL_BYTES;
-                                tail.drain(..excess);
-                            }
-                        }
-                    }
-                }
-                tail
-            })
-        });
-        let mut file = tokio::fs::File::create(&part_path).await.ok();
-        let mut buf = vec![0u8; 64 * 1024];
-        let mut ok = true;
-        // Per-read timeout so a wedged yt-dlp (stalled TCP / hung extractor)
-        // can't keep this task and the child process alive forever with
-        // `complete` stuck false — otherwise every later request for the id
-        // attaches to the dead entry and blocks 120s then 504.
-        const READ_TIMEOUT: Duration = Duration::from_secs(60);
-        loop {
-            match tokio::time::timeout(READ_TIMEOUT, stdout.read(&mut buf)).await {
-                Err(_) => {
-                    eprintln!("[stream] read timeout for {video_id}; killing yt-dlp");
-                    let _ = child.start_kill();
-                    ok = false;
-                    break;
-                }
-                Ok(Ok(0)) => break,
-                Ok(Ok(n)) => {
-                    let chunk = &buf[..n];
-                    if let Some(ref mut f) = file {
-                        if let Err(e) = f.write_all(chunk).await {
-                            eprintln!("[stream] write .part: {e}");
-                            file = None;
-                            // A truncated prefix must NOT be renamed to .webm
-                            // and cached — mark the whole download failed.
-                            ok = false;
-                        }
-                    }
-                    state.notify.notify_waiters();
-                }
-                Ok(Err(e)) => {
-                    eprintln!("[stream] read stdout: {e}");
-                    ok = false;
-                    break;
-                }
-            }
+        if state.cancelled.load(Ordering::Acquire) {
+            finish("cancelled", None).await;
+            return;
         }
-        if let Some(mut f) = file.take() {
-            let _ = f.flush().await;
-            drop(f);
-        }
-        let status = child.wait().await;
-        let stderr = match stderr_task {
-            Some(task) => task.await.unwrap_or_default(),
-            None => Vec::new(),
-        };
-        let success = ok && status.map(|s| s.success()).unwrap_or(false);
 
-        // Finish all file operations BEFORE signalling completion.
-        // Otherwise handlers waiting on `state.complete` can race and
-        // observe `final_path.exists() == false` in the tiny window
-        // between yt-dlp exit and our rename, returning 502 even
-        // though the download succeeded.
-        // 32 KB floor: yt-dlp can exit 0 with a near-empty payload when
-        // YouTube serves a storyboard-only response (rate-limit, geo-block,
-        // SABR fallout). Renaming such a stub to .webm would pin a
-        // permanently-broken cache entry that fails MEDIA_ERR_DECODE on
-        // every replay — drop it instead so the next request retries.
-        let part_size = tokio::fs::metadata(&part_path)
-            .await
-            .map(|m| m.len())
-            .unwrap_or(0);
-        let supported_container =
-            part_size >= MIN_AUDIO_BYTES && has_supported_audio_container(&part_path).await;
-        let mut ready = false;
-        if success && supported_container {
-            if let Err(e) = tokio::fs::rename(&part_path, &final_path).await {
-                eprintln!("[stream] rename: {e}");
-                *state.error.lock().await = Some(format!(
-                    "download finished but the audio cache file could not be installed: {e}"
-                ));
-                let _ = tokio::fs::remove_file(&part_path).await;
-            } else {
-                ready = true;
-                eprintln!("[stream] cached {video_id} ({part_size} bytes)");
+        state.downloaded_bytes.store(0, Ordering::Release);
+        let mut attempt = run_offline_download_attempt(
+            &video_id,
+            &srv,
+            &state,
+            &ytdlp_program,
+            provider.as_ref(),
+            &target_dir,
+            &part_path,
+            &final_path,
+        )
+        .await;
+
+        let retry_failure = match &attempt {
+            OfflineDownloadAttempt::Failed {
+                kind,
+                provider_retryable,
+                ..
+            } if provider.is_some()
+                && *kind != YtdlpFailureKind::RateLimited
+                && *provider_retryable =>
+            {
+                Some((*kind, *provider_retryable))
             }
-        } else {
-            if success && part_size < MIN_AUDIO_BYTES {
-                let detail = format!(
-                    "yt-dlp returned only {part_size} bytes (minimum audio size is {MIN_AUDIO_BYTES})"
+            _ => None,
+        };
+        if let Some((kind, provider_retryable)) = retry_failure {
+            let provider_is_healthy =
+                match wait_or_cancel(&state, pot_provider::current_is_healthy()).await {
+                    Some(healthy) => healthy,
+                    None => {
+                        finish("cancelled", None).await;
+                        return;
+                    }
+                };
+            if should_retry_after_provider_failure(
+                true,
+                kind,
+                provider_retryable,
+                provider_is_healthy,
+            ) {
+                ytdlp::emit_state(
+                    &srv.app,
+                    "provider",
+                    Some("Restarting managed YouTube PO-token provider".into()),
                 );
-                eprintln!("[stream] download too small for {video_id}: {detail}");
-                *state.error.lock().await = Some(detail);
-            } else if success {
-                let detail = "yt-dlp returned an unsupported audio container".to_string();
-                eprintln!("[stream] unsupported audio payload for {video_id}; not caching");
-                *state.error.lock().await = Some(detail);
-            } else {
-                let detail = summarize_ytdlp_stderr(&stderr);
-                eprintln!("[stream] download failed {video_id}: {detail}");
-                *state.error.lock().await = Some(detail);
+                let retry_provider = match wait_or_cancel(
+                    &state,
+                    pot_provider::ensure(&srv.app, &srv.ytdlp_bin, true),
+                )
+                .await
+                {
+                    Some(Ok(config)) => {
+                        ytdlp::emit_state(&srv.app, "ready", None);
+                        Some(config)
+                    }
+                    Some(Err(error)) => {
+                        eprintln!(
+                            "[pot-provider] restart failed; retrying with fallback clients: {error}"
+                        );
+                        ytdlp::emit_state(
+                            &srv.app,
+                            "ready",
+                            Some(
+                                "PO-token provider restart failed; retrying with fallback download clients"
+                                    .into(),
+                            ),
+                        );
+                        None
+                    }
+                    None => {
+                        ytdlp::emit_state(&srv.app, "cancelled", None);
+                        finish("cancelled", None).await;
+                        return;
+                    }
+                };
+
+                // A provider crash is the only automatic per-track retry. Its
+                // progress starts at zero, and the second result is final even
+                // if the replacement provider also exits.
+                state.downloaded_bytes.store(0, Ordering::Release);
+                let _ = publish_offline_download(&srv, &state, "downloading", None).await;
+                attempt = run_offline_download_attempt(
+                    &video_id,
+                    &srv,
+                    &state,
+                    &ytdlp_program,
+                    retry_provider.as_ref(),
+                    &target_dir,
+                    &part_path,
+                    &final_path,
+                )
+                .await;
             }
-            let _ = tokio::fs::remove_file(&part_path).await;
         }
 
-        state.complete.store(true, Ordering::Release);
-        state.notify.notify_waiters();
-
-        if ready {
-            // Evict from in-memory map after a grace period so a brief
-            // re-play stays in RAM, then falls back to on-disk ServeFile.
-            let downloads_evict = downloads.clone();
-            let key = map_key.clone();
-            tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_secs(60)).await;
-                downloads_evict.lock().await.remove(&key);
-            });
-        } else {
-            // Failed: drop the entry immediately so the next play retries
-            // instead of getting an instant 502 for the whole 60s window.
-            downloads.lock().await.remove(&map_key);
+        match attempt {
+            OfflineDownloadAttempt::Completed => finish("completed", None).await,
+            OfflineDownloadAttempt::Cancelled => finish("cancelled", None).await,
+            OfflineDownloadAttempt::Failed { error, kind, .. } => {
+                if kind == YtdlpFailureKind::RateLimited {
+                    if let Err(persist_error) = persist_offline_download_cooldown(&srv.app) {
+                        eprintln!(
+                            "[offline] could not persist the download rate-limit cooldown: {persist_error}"
+                        );
+                    }
+                    eprintln!(
+                        "[offline] YouTube rate limited explicit downloads; pausing new attempts"
+                    );
+                }
+                finish("failed", Some(error)).await;
+            }
         }
     });
 }
@@ -2710,8 +3809,8 @@ async fn is_valid_cached_audio(path: &std::path::Path) -> bool {
     size >= MIN_AUDIO_BYTES && has_supported_audio_container(path).await
 }
 
-/// GET /stream/:video_id — unified serving path supporting Range
-/// requests even during an active download.
+/// Range-serve a finalized explicit offline download. This handler never
+/// invokes yt-dlp; online playback belongs exclusively to the WebPlayer.
 async fn stream_handler(
     AxumState(srv): AxumState<StreamServer>,
     Path(video_id): Path<String>,
@@ -2720,65 +3819,28 @@ async fn stream_handler(
     if !sanitize_video_id(&video_id) {
         return (StatusCode::BAD_REQUEST, "invalid videoId").into_response();
     }
-
-    let ephemeral = is_ephemeral(&req);
-    let target_dir = if ephemeral {
-        srv.ephemeral_dir.clone()
-    } else {
-        srv.cache_dir.clone()
-    };
-    let map_key = if ephemeral {
-        format!("e:{video_id}")
-    } else {
-        format!("p:{video_id}")
-    };
-    let final_path = target_dir.join(format!("{video_id}.webm"));
-
-    // A decoder/source failure may mean an older release cached a truncated
-    // or mislabeled payload. The frontend marks its single automatic retry as
-    // a refresh so that retry cannot keep serving the same poisoned file.
-    if requests_stream_refresh(&req) {
-        srv.downloads.lock().await.remove(&map_key);
-        let _ = tokio::fs::remove_file(&final_path).await;
-        let _ = tokio::fs::remove_file(target_dir.join(format!("{video_id}.part"))).await;
-        // Strip the one-shot flag before Chromium makes later Range requests;
-        // otherwise every seek using the same media URL would evict the file.
-        let location = stream_location_without_refresh(&req);
+    // Online playback belongs exclusively to the official WebPlayer. The
+    // loopback media route may only Range-serve a finalized local download;
+    // it must never become an implicit yt-dlp resolver again.
+    if !requests_cache_only(&req) {
         return (
-            StatusCode::TEMPORARY_REDIRECT,
-            [(axum::http::header::LOCATION, location)],
+            StatusCode::FORBIDDEN,
+            "online extraction is disabled; use an explicit playlist download",
         )
             .into_response();
     }
 
-    // Old versions could leave a truncated or mislabeled file in the
-    // persistent cache. Validate it before ServeFile sees it so known poison
-    // heals on the first request rather than costing a browser error + retry.
-    if final_path.exists() && !is_valid_cached_audio(&final_path).await {
-        eprintln!("[stream] dropping invalid cached payload for {video_id}");
-        let _ = tokio::fs::remove_file(&final_path).await;
-        srv.downloads.lock().await.remove(&map_key);
+    let final_path = srv.cache_dir.join(format!("{video_id}.webm"));
+    let final_valid = is_playable_offline_audio(&srv.cache_dir, &video_id).await;
+    if !final_valid {
+        let status = if final_path.exists() {
+            StatusCode::UNPROCESSABLE_ENTITY
+        } else {
+            StatusCode::NOT_FOUND
+        };
+        return (status, "cached audio is unavailable").into_response();
     }
 
-    // If the full file isn't on disk yet, start (or attach to) the
-    // download and block until it completes. Attempting to progressively
-    // stream yt-dlp's stdout broke in two ways:
-    //   - m4a/mp4 audio tracks often have the `moov` atom at the end of
-    //     the file, so Chromium can't decode them until every byte has
-    //     arrived. The first request then fails with
-    //     MEDIA_ERR_SRC_NOT_SUPPORTED.
-    //   - There's no valid HTTP response for a stream whose total length
-    //     is unknown AND whose Range subset has an unknown end
-    //     (`Content-Range: bytes 0-*/*` is grammatically invalid per
-    //     RFC 7233). Serving with `Accept-Ranges: none` works but then
-    //     Chromium disables seeking entirely.
-    //
-    // Full download + `ServeFile` sidesteps both problems: Range
-    // requests, seeking, content-type detection, and large file support
-    // all become the crate's problem. The "first-play" latency is just
-    // the download time (~1-3 s on a healthy connection for a typical
-    // 3-minute track) and the existing next-track prefetcher hides it
-    // from the user on every track except the very first one.
     let t0 = std::time::Instant::now();
 
     let range_hdr = req
@@ -2787,70 +3849,7 @@ async fn stream_handler(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    eprintln!(
-        "[stream] GET /stream/{video_id} range={range_hdr:?} cached={} ephemeral={ephemeral}",
-        final_path.exists()
-    );
-
-    if !final_path.exists() {
-        let state = {
-            let mut map = srv.downloads.lock().await;
-            if let Some(s) = map.get(&map_key) {
-                s.clone()
-            } else {
-                let s = Arc::new(DownloadState {
-                    complete: Arc::new(AtomicBool::new(false)),
-                    notify: Arc::new(Notify::new()),
-                    error: Arc::new(Mutex::new(None)),
-                });
-                map.insert(map_key.clone(), s.clone());
-                drop(map);
-                spawn_downloader(
-                    video_id.clone(),
-                    target_dir.clone(),
-                    map_key.clone(),
-                    srv.clone(),
-                    s.clone(),
-                    false,
-                );
-                s
-            }
-        };
-
-        // Bounded wait — 120 s is generous for any single track; if
-        // yt-dlp is wedged past that, we'd rather fail fast than hang
-        // the audio element forever.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
-        while !state.complete.load(Ordering::Acquire) {
-            if tokio::time::Instant::now() >= deadline {
-                eprintln!("[stream] {video_id}: TIMEOUT after 120s");
-                return (StatusCode::GATEWAY_TIMEOUT, "download timeout").into_response();
-            }
-            let notified = state.notify.notified();
-            tokio::pin!(notified);
-            let _ = tokio::time::timeout(Duration::from_secs(5), notified).await;
-        }
-
-        if !final_path.exists() {
-            let detail = state
-                .error
-                .lock()
-                .await
-                .clone()
-                .unwrap_or_else(|| "yt-dlp did not produce a playable audio file".into());
-            let status = ytdlp_failure_status(&detail);
-            eprintln!(
-                "[stream] {video_id}: {} — complete but no .webm (elapsed {:.2}s)",
-                status.as_u16(),
-                t0.elapsed().as_secs_f32()
-            );
-            return (status, detail).into_response();
-        }
-        eprintln!(
-            "[stream] {video_id}: download finished in {:.2}s",
-            t0.elapsed().as_secs_f32()
-        );
-    }
+    eprintln!("[offline] GET /stream/{video_id} range={range_hdr:?} cached={final_valid}");
 
     // Sniff actual content-type from the file's magic bytes. Every
     // track is saved with a `.webm` extension, but yt-dlp falls back
@@ -2872,7 +3871,7 @@ async fn stream_handler(
         );
     }
     eprintln!(
-        "[stream] {video_id}: responding {} ({:.2}s total) ct={:?} len={:?}",
+        "[offline] {video_id}: responding {} ({:.2}s total) ct={:?} len={:?}",
         resp.status(),
         t0.elapsed().as_secs_f32(),
         resp.headers()
@@ -2926,136 +3925,85 @@ async fn cover_serve_handler(
     resp
 }
 
-/// GET /prefetch/:video_id — fire-and-forget cache warmer. Honours the
-/// same `?ephemeral=1` flag as /stream so non-Premium prefetches (if
-/// the frontend ever lets one through) land in the session-only pool
-/// rather than the persistent cache.
-async fn prefetch_handler(
-    AxumState(srv): AxumState<StreamServer>,
-    Path(video_id): Path<String>,
-    req: Request,
-) -> StatusCode {
-    if !sanitize_video_id(&video_id) {
-        return StatusCode::BAD_REQUEST;
-    }
-    let ephemeral = is_ephemeral(&req);
-    let target_dir = if ephemeral {
-        srv.ephemeral_dir.clone()
-    } else {
-        srv.cache_dir.clone()
-    };
-    let map_key = if ephemeral {
-        format!("e:{video_id}")
-    } else {
-        format!("p:{video_id}")
-    };
-    let final_path = target_dir.join(format!("{video_id}.webm"));
-    if final_path.exists() {
-        return StatusCode::OK;
-    }
-    let state = {
-        // Single lock hold for check-then-insert so a concurrent /stream
-        // (whose check+insert is already atomic) or a second /prefetch can't
-        // slip in between and spawn a second downloader writing the same
-        // .part file, corrupting the cached track.
-        let mut map = srv.downloads.lock().await;
-        if map.contains_key(&map_key) {
-            return StatusCode::ACCEPTED;
-        }
-        let state = Arc::new(DownloadState {
-            complete: Arc::new(AtomicBool::new(false)),
-            notify: Arc::new(Notify::new()),
-            error: Arc::new(Mutex::new(None)),
-        });
-        map.insert(map_key.clone(), state.clone());
-        state
-    };
-    spawn_downloader(video_id, target_dir, map_key, srv.clone(), state, true);
-    StatusCode::ACCEPTED
-}
-
 /// Generate an unguessable per-launch token used as a URL path prefix on
-/// the local stream server. Uses OS-seeded RandomState (SipHash keys)
-/// instead of pulling in an RNG crate — 128 bits is ample for a localhost
-/// secret that only needs to resist online guessing by a web page.
-fn generate_stream_token() -> String {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-    let mut out = String::with_capacity(32);
-    for _ in 0..2 {
-        let mut h = RandomState::new().build_hasher();
-        h.write_u64(0x9E37_79B9_7F4A_7C15);
-        out.push_str(&format!("{:016x}", h.finish()));
+/// the local stream server. Stream and bridge tokens are independent 256-bit
+/// values filled directly by the operating system CSPRNG.
+fn generate_stream_token() -> Result<String, String> {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).map_err(|error| format!("OS randomness unavailable: {error}"))?;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    use std::fmt::Write as _;
+    for byte in bytes {
+        write!(&mut out, "{byte:02x}").expect("writing hex into String cannot fail");
     }
-    out
+    Ok(out)
 }
 
 async fn start_stream_server(
     app: tauri::AppHandle,
     port_state: Arc<Mutex<Option<u16>>>,
     token_state: Arc<Mutex<Option<String>>>,
+    web_player_token_state: Arc<Mutex<Option<String>>>,
+    runtime_state: Arc<Mutex<Option<StreamServer>>>,
+    offline_jobs: OfflineDownloadJobs,
     cache_dir: PathBuf,
-    ephemeral_dir: PathBuf,
     cover_dir: PathBuf,
     ytdlp_bin: PathBuf,
+    web_player_state: web_player::WebPlayerState,
 ) {
     if let Err(e) = tokio::fs::create_dir_all(&cache_dir).await {
         eprintln!("[stream-server] mkdir {cache_dir:?}: {e}");
     }
-    if let Err(e) = tokio::fs::create_dir_all(&ephemeral_dir).await {
-        eprintln!("[stream-server] mkdir {ephemeral_dir:?}: {e}");
-    }
     if let Err(e) = tokio::fs::create_dir_all(&cover_dir).await {
         eprintln!("[stream-server] mkdir {cover_dir:?}: {e}");
     }
-
-    // Wipe whatever a previous (anonymous / Free) session left behind.
-    // Persisting tracks across restarts is a Premium-only feature; if a
-    // non-Premium user manages to crash the app mid-stream we still
-    // want the leftover .webm gone before the next launch.
-    if let Ok(mut rd) = tokio::fs::read_dir(&ephemeral_dir).await {
-        let mut wiped: u64 = 0;
-        while let Ok(Some(entry)) = rd.next_entry().await {
-            if let Ok(meta) = entry.metadata().await {
-                if meta.is_file() {
-                    wiped += meta.len();
-                    let _ = tokio::fs::remove_file(entry.path()).await;
-                }
-            }
-        }
-        if wiped > 0 {
-            eprintln!("[stream-server] wiped {wiped} bytes from ephemeral dir");
-        }
-    }
+    recover_cache_backups(&cache_dir).await;
 
     let server = StreamServer {
         app,
         cache_dir,
-        ephemeral_dir,
         cover_dir,
         downloads: Arc::new(Mutex::new(HashMap::new())),
+        offline_file_ops: Arc::new(Mutex::new(())),
         ytdlp_bin,
-        // Serialize extraction. Concurrent player requests from one IP make
-        // YouTube's guest-session rate limit arrive much sooner. The frontend
-        // delays best-effort prefetch so active playback retains priority.
+        // Explicit playlist downloads are sequential. This native guard also
+        // prevents future callers from fanning out extraction processes.
         limiter: Arc::new(Semaphore::new(1)),
+        offline_jobs,
     };
+    *runtime_state.lock().await = Some(server.clone());
 
     // Per-launch token as an unguessable path prefix. Baked into the base
     // URL (get_stream_base_url) and cover URLs (cache_cover), so it's
     // transparent to the webview but blocks blind access from a web page
     // that only knows the random port.
-    let token = generate_stream_token();
+    let token = match generate_stream_token() {
+        Ok(token) => token,
+        Err(error) => {
+            eprintln!("[stream-server] {error}");
+            return;
+        }
+    };
+    let web_player_token = match generate_stream_token() {
+        Ok(token) => token,
+        Err(error) => {
+            eprintln!("[stream-server] {error}");
+            return;
+        }
+    };
     *token_state.lock().await = Some(token.clone());
+    *web_player_token_state.lock().await = Some(web_player_token.clone());
 
+    let bridge_app = server.app.clone();
     let routes = Router::new()
         .route("/stream/:video_id", get(stream_handler))
-        .route("/prefetch/:video_id", get(prefetch_handler))
         .route("/cover/:filename", get(cover_serve_handler))
-        .with_state(server);
+        .with_state(server)
+        .layer(CorsLayer::permissive());
+    let bridge_routes = web_player::bridge_router(bridge_app, web_player_state);
     let app = Router::new()
         .nest(&format!("/{token}"), routes)
-        .layer(CorsLayer::permissive());
+        .nest(&format!("/{web_player_token}"), bridge_routes);
 
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
     let listener = match tokio::net::TcpListener::bind(addr).await {
@@ -3173,6 +4121,11 @@ pub fn run() {
     let state = StreamServerState::default();
     let port_handle = state.port.clone();
     let token_handle = state.token.clone();
+    let web_player_token_handle = state.web_player_token.clone();
+    let stream_runtime_handle = state.runtime.clone();
+    let offline_jobs_handle = state.offline_jobs.clone();
+    let web_player_state = web_player::WebPlayerState::default();
+    let web_player_server_state = web_player_state.clone();
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
@@ -3193,7 +4146,7 @@ pub fn run() {
                 // music.youtube.com window into view until the user minimized
                 // it. Keeping them out of the store lets their builder flags
                 // (hidden, off-screen) hold on every launch.
-                .with_filter(|label| !label.starts_with("keeper-"))
+                .with_filter(|label| !label.starts_with("keeper-") && label != "youtube-player")
                 .build(),
         )
         .plugin(tauri_plugin_store::Builder::new().build())
@@ -3209,15 +4162,23 @@ pub fn run() {
             None,
         ))
         .manage(state)
+        .manage(web_player_state)
         .manage(CloseBehavior::default())
         .manage(JarWriteLock::default())
+        .manage(AccountSessionGuard::default())
         .manage(RefreshGuard::default())
         .manage(discord::spawn())
         .manage(lastfm::LastfmState::default())
         .invoke_handler(tauri::generate_handler![
             ensure_ytdlp,
-            resolve_stream_ytdlp,
             get_stream_base_url,
+            start_offline_download,
+            cancel_offline_download,
+            list_offline_downloads,
+            web_player_load,
+            web_player_control,
+            web_player_reset,
+            web_player_health,
             start_login,
             get_cookie_header,
             get_auth_context,
@@ -3233,7 +4194,7 @@ pub fn run() {
             get_active_account_id,
             list_cache,
             delete_cache_entries,
-            set_cache_meta,
+            mark_offline_file_unplayable,
             cache_cover,
             cover_cache_stats,
             clear_cover_cache,
@@ -3295,6 +4256,9 @@ pub fn run() {
         .setup(move |app| {
             let port = port_handle.clone();
             let token = token_handle.clone();
+            let web_player_token = web_player_token_handle.clone();
+            let stream_runtime = stream_runtime_handle.clone();
+            let offline_jobs = offline_jobs_handle.clone();
             // User-chosen cache root (Settings → Storage) or the OS
             // default. Captured once and exposed as managed state so
             // every cache-path computation matches the directories the
@@ -3302,17 +4266,16 @@ pub fn run() {
             // later only applies after relaunch.
             let cache_root =
                 stored_cache_root(app.handle()).unwrap_or_else(|| default_cache_root(app.handle()));
+            let legacy_stream_dir = legacy_cache_root(app.handle()).map(|root| root.join("stream"));
             app.manage(ActiveCacheRoot(cache_root.clone()));
             // Retry any scrobbles stranded offline on the previous run. Spawns
             // its own task; a no-op when Last.fm isn't configured or the queue
             // is empty. See src/lastfm.rs.
             lastfm::flush_on_startup(app.handle().clone());
             let cache_dir = cache_root.join("stream");
-            let ephemeral_dir = cache_root.join("stream-ephemeral");
-            let cover_dir = cache_root.join("covers");
             let handle = app.handle().clone();
+            let cover_dir = cover_cache_dir(&handle);
             eprintln!("[stream-server] cache dir: {cache_dir:?}");
-            eprintln!("[stream-server] ephemeral dir: {ephemeral_dir:?}");
             eprintln!("[stream-server] cover dir: {cover_dir:?}");
             let ytdlp_bin = ytdlp::managed_path(&handle);
             tauri::async_runtime::spawn(async move {
@@ -3322,14 +4285,20 @@ pub fn run() {
                 // email-based dedup before the UI reads the list.
                 dedup_accounts_by_identity(&handle).await;
                 cleanup_login_artifacts(&handle).await;
+                if let Some(legacy_stream_dir) = legacy_stream_dir.as_deref() {
+                    import_legacy_offline_files(legacy_stream_dir, &cache_dir).await;
+                }
                 start_stream_server(
                     handle.clone(),
                     port,
                     token,
+                    web_player_token,
+                    stream_runtime,
+                    offline_jobs,
                     cache_dir,
-                    ephemeral_dir,
                     cover_dir,
                     ytdlp_bin,
+                    web_player_server_state,
                 )
                 .await;
             });
@@ -3390,8 +4359,14 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        audio_mime_from_header, generate_stream_token, stream_location_without_refresh,
-        summarize_ytdlp_stderr, ytdlp_failure_status,
+        audio_mime_from_header, auth_snapshot_is_current, classify_ytdlp_failure,
+        cooldown_remaining_at, generate_stream_token, import_legacy_offline_files,
+        install_cached_audio, is_playable_offline_audio, is_valid_cached_audio,
+        offline_download_cooldown_message, offline_invalid_marker, recover_cache_backups,
+        requests_cache_only, should_retry_after_provider_failure, summarize_ytdlp_stderr,
+        validate_account_signin_url, validate_page_id, wait_for_web_player_bridge, Account,
+        AccountsIndex, StreamServerState, YtdlpFailureKind, OFFLINE_DOWNLOAD_COOLDOWN,
+        YTDLP_OFFLINE_RETRY_ARGS,
     };
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
@@ -3401,60 +4376,217 @@ mod tests {
 
     #[test]
     fn stream_token_is_nonempty_hex_and_varies() {
-        let a = generate_stream_token();
-        let b = generate_stream_token();
-        assert_eq!(a.len(), 32, "token should be 128 bits of hex");
+        let a = generate_stream_token().unwrap();
+        let b = generate_stream_token().unwrap();
+        assert_eq!(a.len(), 64, "token should be 256 bits of hex");
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(a, b, "two tokens in a row must differ");
     }
 
-    #[test]
-    fn refresh_redirect_keeps_non_refresh_query_flags() {
-        let request = Request::builder()
-            .uri("/stream/E7LVi1AA218?ephemeral=1&refresh=1")
-            .body(Body::empty())
-            .unwrap();
+    #[tokio::test]
+    async fn web_player_bridge_waits_through_cold_start() {
+        let state = StreamServerState::default();
+        let port = state.port.clone();
+        let token = state.web_player_token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            *port.lock().await = Some(43123);
+            *token.lock().await = Some("bridge-secret".into());
+        });
+
         assert_eq!(
-            stream_location_without_refresh(&request),
-            "/stream/E7LVi1AA218?ephemeral=1"
+            wait_for_web_player_bridge(&state).await.unwrap(),
+            (43123, "bridge-secret".into())
         );
     }
 
     #[test]
-    fn nested_refresh_redirect_keeps_stream_token_prefix() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let token = "deadbeefdeadbeefdeadbeefdeadbeef";
-            let inner = Router::new().route(
-                "/stream/:video_id",
-                get(|req: Request<Body>| async move {
-                    let location = stream_location_without_refresh(&req);
-                    (
-                        StatusCode::TEMPORARY_REDIRECT,
-                        [(axum::http::header::LOCATION, location)],
-                    )
-                }),
-            );
-            let app: Router = Router::new().nest(&format!("/{token}"), inner);
-            let response = app
-                .oneshot(
-                    Request::builder()
-                        .uri(format!("/{token}/stream/E7LVi1AA218?ephemeral=1&refresh=1"))
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
+    fn account_signin_url_validation_is_strict_and_opaque() {
+        let valid =
+            "https://www.youtube.com/signin?action_handle_signin=true&pageid=123%2B456&next=%2F";
+        let parsed = validate_account_signin_url(valid).unwrap();
+        assert_eq!(parsed.as_str(), valid);
 
-            assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
-            assert_eq!(
-                response
-                    .headers()
-                    .get(axum::http::header::LOCATION)
-                    .and_then(|value| value.to_str().ok()),
-                Some("/deadbeefdeadbeefdeadbeefdeadbeef/stream/E7LVi1AA218?ephemeral=1")
-            );
-        });
+        for invalid in [
+            "http://www.youtube.com/signin?pageid=123",
+            "https://youtube.com/signin?pageid=123",
+            "https://www.youtube.com:444/signin?pageid=123",
+            "https://user@www.youtube.com/signin?pageid=123",
+            "https://www.youtube.com/signin/?pageid=123",
+            "https://www.youtube.com/watch?pageid=123",
+            "https://www.youtube.com/signin?pageid=123#fragment",
+            " https://www.youtube.com/signin?pageid=123",
+            "https://www.youtube.com/signin?page id=123",
+        ] {
+            assert!(validate_account_signin_url(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn page_id_validation_rejects_empty_or_scriptable_values() {
+        assert!(validate_page_id(None));
+        assert!(validate_page_id(Some("108031863270526872265")));
+        assert!(!validate_page_id(Some("")));
+        assert!(!validate_page_id(Some("page id")));
+        assert!(!validate_page_id(Some("x');alert(1)//")));
+    }
+
+    #[test]
+    fn cookie_merge_snapshot_is_bound_to_account_and_epoch() {
+        let index = AccountsIndex {
+            active: Some("account-a".into()),
+            accounts: vec![
+                Account {
+                    id: "account-a".into(),
+                    ..Default::default()
+                },
+                Account {
+                    id: "account-b".into(),
+                    ..Default::default()
+                },
+            ],
+        };
+        assert!(auth_snapshot_is_current(&index, "account-a", 7, 7));
+        assert!(!auth_snapshot_is_current(&index, "account-b", 7, 7));
+        assert!(!auth_snapshot_is_current(&index, "account-a", 6, 7));
+        assert!(!auth_snapshot_is_current(&index, "missing", 7, 7));
+    }
+
+    #[test]
+    fn cache_only_flag_is_explicit_and_order_independent() {
+        let with_flag = Request::builder()
+            .uri("/stream/E7LVi1AA218?ephemeral=1&cache_only=true")
+            .body(Body::empty())
+            .unwrap();
+        let without_flag = Request::builder()
+            .uri("/stream/E7LVi1AA218?ephemeral=1")
+            .body(Body::empty())
+            .unwrap();
+        assert!(requests_cache_only(&with_flag));
+        assert!(!requests_cache_only(&without_flag));
+    }
+
+    fn unique_cache_test_dir(label: &str) -> std::path::PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("goosic-{label}-{}-{nonce}", std::process::id()))
+    }
+
+    fn valid_webm_bytes() -> Vec<u8> {
+        let mut bytes = vec![0; super::MIN_AUDIO_BYTES as usize];
+        bytes[..4].copy_from_slice(&[0x1a, 0x45, 0xdf, 0xa3]);
+        bytes
+    }
+
+    #[tokio::test]
+    async fn failed_replacement_restores_the_old_download() {
+        let dir = unique_cache_test_dir("replace");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let final_path = dir.join("E7LVi1AA218.webm");
+        tokio::fs::write(&final_path, valid_webm_bytes())
+            .await
+            .unwrap();
+
+        let result = install_cached_audio(&dir.join("missing.part"), &final_path).await;
+
+        assert!(result.is_err());
+        assert!(is_valid_cached_audio(&final_path).await);
+        assert!(!dir.join("E7LVi1AA218.webm.backup").exists());
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn startup_recovers_an_interrupted_cache_backup() {
+        let dir = unique_cache_test_dir("recover");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let final_path = dir.join("E7LVi1AA218.webm");
+        let backup_path = dir.join("E7LVi1AA218.webm.backup");
+        tokio::fs::write(&final_path, b"interrupted").await.unwrap();
+        tokio::fs::write(&backup_path, valid_webm_bytes())
+            .await
+            .unwrap();
+
+        recover_cache_backups(&dir).await;
+
+        assert!(is_valid_cached_audio(&final_path).await);
+        assert!(!backup_path.exists());
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn decoder_failure_marker_preserves_bytes_and_requires_repair() {
+        let dir = unique_cache_test_dir("decoder-marker");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let video_id = "E7LVi1AA218";
+        let final_path = dir.join(format!("{video_id}.webm"));
+        tokio::fs::write(&final_path, valid_webm_bytes())
+            .await
+            .unwrap();
+
+        assert!(is_playable_offline_audio(&dir, video_id).await);
+        tokio::fs::write(offline_invalid_marker(&dir, video_id), b"unplayable")
+            .await
+            .unwrap();
+
+        assert!(
+            final_path.exists(),
+            "the user's download must remain intact"
+        );
+        assert!(is_valid_cached_audio(&final_path).await);
+        assert!(!is_playable_offline_audio(&dir, video_id).await);
+
+        tokio::fs::remove_file(offline_invalid_marker(&dir, video_id))
+            .await
+            .unwrap();
+        assert!(is_playable_offline_audio(&dir, video_id).await);
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn legacy_download_import_is_non_destructive_and_never_overwrites() {
+        let source = unique_cache_test_dir("legacy-source");
+        let target = unique_cache_test_dir("durable-target");
+        tokio::fs::create_dir_all(&source).await.unwrap();
+        tokio::fs::create_dir_all(&target).await.unwrap();
+        let name = "E7LVi1AA218.webm";
+        tokio::fs::write(source.join(name), valid_webm_bytes())
+            .await
+            .unwrap();
+        tokio::fs::write(target.join(name), b"keep-target")
+            .await
+            .unwrap();
+        tokio::fs::write(source.join("E7LVi1AA218.meta.json"), b"{}")
+            .await
+            .unwrap();
+        tokio::fs::write(source.join("E7LVi1AA218.invalid"), b"stale")
+            .await
+            .unwrap();
+        tokio::fs::write(source.join("abcdefghijk.webm"), valid_webm_bytes())
+            .await
+            .unwrap();
+        tokio::fs::write(source.join("abcdefghijk.meta.json"), b"{}")
+            .await
+            .unwrap();
+        tokio::fs::write(source.join("ignored.part"), b"partial")
+            .await
+            .unwrap();
+
+        import_legacy_offline_files(&source, &target).await;
+
+        assert!(source.join(name).exists(), "legacy bytes must be preserved");
+        assert_eq!(
+            tokio::fs::read(target.join(name)).await.unwrap(),
+            b"keep-target"
+        );
+        assert!(!target.join("E7LVi1AA218.meta.json").exists());
+        assert!(!target.join("E7LVi1AA218.invalid").exists());
+        assert!(target.join("abcdefghijk.webm").exists());
+        assert!(target.join("abcdefghijk.meta.json").exists());
+        assert!(!target.join("ignored.part").exists());
+        let _ = tokio::fs::remove_dir_all(&source).await;
+        let _ = tokio::fs::remove_dir_all(&target).await;
     }
 
     #[test]
@@ -3481,27 +4613,91 @@ mod tests {
 
     #[test]
     fn resolver_error_summary_drops_session_credentials() {
-        let stderr = b"WARNING: Missing required Visitor Data: secret\nWARNING: po_token=secret\nERROR: HTTP Error 429: Too Many Requests\n";
+        let stderr = b"WARNING: Missing required Visitor Data: secret\nWARNING: po_token=secret\nWARNING: https://rr1---sn.example.googlevideo.com/videoplayback?token=secret\nAuthorization: Bearer secret\nERROR: HTTP Error 429: Too Many Requests\n";
         let summary = summarize_ytdlp_stderr(stderr);
         assert!(!summary.to_ascii_lowercase().contains("visitor"));
         assert!(!summary.to_ascii_lowercase().contains("po_token"));
+        assert!(!summary.to_ascii_lowercase().contains("googlevideo"));
+        assert!(!summary.to_ascii_lowercase().contains("bearer"));
         assert!(summary.contains("HTTP Error 429"));
     }
 
     #[test]
-    fn resolver_failures_preserve_retry_semantics() {
+    fn raw_rate_limit_classifier_survives_display_redaction() {
+        let with_help_url = b"ERROR: Sign in to confirm you're not a bot. Use https://github.com/yt-dlp/yt-dlp/wiki/FAQ for help\n";
         assert_eq!(
-            ytdlp_failure_status("HTTP Error 429: Too Many Requests"),
-            StatusCode::TOO_MANY_REQUESTS
+            classify_ytdlp_failure(with_help_url),
+            YtdlpFailureKind::RateLimited
         );
         assert_eq!(
-            ytdlp_failure_status("ERROR: Requested format is not available"),
-            StatusCode::UNPROCESSABLE_ENTITY
+            summarize_ytdlp_stderr(with_help_url),
+            "yt-dlp produced no audio",
+            "the credential-safe display path may drop URL-bearing lines"
         );
         assert_eq!(
-            ytdlp_failure_status("ERROR: transient connection reset"),
-            StatusCode::BAD_GATEWAY
+            classify_ytdlp_failure(b"HTTP Error 429: Too Many Requests"),
+            YtdlpFailureKind::RateLimited
         );
+        assert_eq!(
+            classify_ytdlp_failure(b"ERROR: requested format is not available"),
+            YtdlpFailureKind::Other
+        );
+    }
+
+    #[test]
+    fn offline_downloads_disable_internal_retries() {
+        assert_eq!(
+            YTDLP_OFFLINE_RETRY_ARGS,
+            ["--retries", "0", "--extractor-retries", "0"]
+        );
+    }
+
+    #[test]
+    fn only_an_unhealthy_used_provider_unlocks_the_single_recovery_retry() {
+        assert!(should_retry_after_provider_failure(
+            true,
+            YtdlpFailureKind::Other,
+            true,
+            false,
+        ));
+        assert!(!should_retry_after_provider_failure(
+            true,
+            YtdlpFailureKind::RateLimited,
+            true,
+            false,
+        ));
+        assert!(!should_retry_after_provider_failure(
+            true,
+            YtdlpFailureKind::Other,
+            true,
+            true,
+        ));
+        assert!(!should_retry_after_provider_failure(
+            false,
+            YtdlpFailureKind::Other,
+            true,
+            false,
+        ));
+        assert!(!should_retry_after_provider_failure(
+            true,
+            YtdlpFailureKind::Other,
+            false,
+            false,
+        ));
+    }
+
+    #[test]
+    fn rate_limit_cooldown_expires_only_after_fifteen_minutes() {
+        let now = 1_700_000_000;
+        let until = now + OFFLINE_DOWNLOAD_COOLDOWN.as_secs();
+        assert_eq!(
+            cooldown_remaining_at(until, now),
+            Some(15 * 60),
+            "the persisted deadline must survive as a full cooldown"
+        );
+        assert!(offline_download_cooldown_message(61).contains("2 minutes"));
+        assert_eq!(cooldown_remaining_at(until, until), None);
+        assert_eq!(cooldown_remaining_at(until, until + 1), None);
     }
 
     // Guards the security fix (review high #1): the stream server nests all

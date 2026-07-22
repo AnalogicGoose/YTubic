@@ -19,13 +19,19 @@
   </a>
 </p>
 
-Built as a reaction to the sluggish webview-wrapper experience — Goosic talks to YouTube's InnerTube API directly, renders its own UI, and caches aggressively, so navigation and playback feel instant.
+Goosic renders its own fast desktop interface and uses InnerTube for browsing,
+search, and library data. Audio plays through a persistent official YouTube
+Music WebPlayer, so guests and free accounts can listen wherever YouTube
+permits it while YouTube's advertisements and account restrictions remain
+intact.
 
 ![Goosic — artist page with the player and synced lyrics](assets/screenshots/artist-page.jpg)
 
 ## Features
 
 - **Fast and responsive UI** — instant navigation with prefetch and aggressive caching; no page reloads, no spinners on every click
+- **Official playback for everyone** — ordinary Play uses YouTube Music's own persistent player for guests, free accounts, and Premium accounts
+- **Offline playlists for Premium** — explicitly download a playlist, follow its progress, and play validated local files later
 - **Flexible player layouts** — dock the player at the bottom or as a right-side panel
 - **Floating player widget** — pop the player out into a compact always-on-top window
 - **Synced lyrics** — line-by-line synced lyrics from multiple providers (LRCLIB, Musixmatch, Genius)
@@ -33,32 +39,32 @@ Built as a reaction to the sluggish webview-wrapper experience — Goosic talks 
 - **Full library support** — your playlists, likes, albums and artists; search with filters; radio/autoplay queues
 - **Windows integration** — media keys, System Media Transport Controls, tray icon, single instance
 - **Linux integration** — media keys via MPRIS, tray icon (needs an AppIndicator/KStatusNotifierItem extension on vanilla GNOME — see FAQ), autostart, single instance
-- **Auto-updates** — the app updates itself from GitHub Releases, and keeps its yt-dlp copy fresh automatically
+- **Auto-updates** — the app updates itself from GitHub Releases
 
 > **Disclaimer:** Goosic is an unofficial client. It is not affiliated with,
 > endorsed by, or sponsored by Google or YouTube. "YouTube" and "YouTube Music"
-> are trademarks of Google LLC. The app streams audio through
-> [yt-dlp](https://github.com/yt-dlp/yt-dlp) and may stop working at any time if
-> YouTube changes its internals. Use at your own risk.
+> are trademarks of Google LLC. Ordinary playback loads the official YouTube
+> Music web player and remains subject to YouTube's advertisements, availability,
+> account restrictions, and terms. Use at your own risk.
 
 ## Install
 
 Download the latest package from the [Releases](https://github.com/AnalogicGoose/Goosic/releases) page and run it.
 
 - **Windows**: `.exe` installer (NSIS), Windows 10/11.
-- **macOS**: universal `.dmg` for Apple Silicon and Intel. The current build is
-  ad-hoc signed, so macOS may require a Gatekeeper override on first launch.
+- **macOS**: macOS 14 or newer, with a universal `.dmg` for Apple Silicon and
+  Intel. The current build is ad-hoc signed, so macOS may require a Gatekeeper
+  override on first launch.
 - **Linux**: `.AppImage` (no install step, just `chmod +x` and run), `.deb`
   (Debian/Ubuntu), or `.rpm` (Fedora/openSUSE). Only the AppImage build
   auto-updates itself; the `.deb`/`.rpm` packages need a manual re-download.
-- On first launch the app downloads its own copy of yt-dlp (~18 MB) and the
-  official Deno runtime archive (~50 MB) into its data folder. Deno is needed
-  by current yt-dlp releases to solve YouTube's JavaScript challenges. Both
-  downloads come directly from their official GitHub Releases; yt-dlp checks
-  every 72 hours and Deno refreshes at most every 90 days.
-- Browsing and search work signed out. Playback, library access, likes, and
-  playlists require signing in with an active YouTube Music/YouTube Premium
-  account.
+- Browsing, search, and ordinary playback work signed out wherever YouTube
+  permits guest playback. Signing in adds library, likes, playlists, and the
+  benefits attached to that YouTube account; Premium is not required for the
+  normal Play action.
+- The managed yt-dlp, Deno, and PO-token tools are installed only when an active
+  Premium user explicitly downloads a playlist. Normal playback never invokes
+  those tools and never downloads tracks in the background.
 
 ### FAQ
 
@@ -71,19 +77,21 @@ public — you can audit it or build it yourself.
 yt-dlp is a widely-used open-source downloader that some AV vendors
 false-positive on. The binary is downloaded directly from yt-dlp's official
 GitHub releases. Deno is an MIT-licensed JavaScript runtime downloaded from
-the official `denoland/deno` GitHub releases.
+the official `denoland/deno` GitHub releases. Goosic uses both only for an
+explicit Premium playlist download, not ordinary playback.
 
 **Will Google ban my account for using this?**
-Browsing/search/library requests look identical to the official web app. The
-app checks the signed-in account's Premium status before playback, but never
-passes account cookies to yt-dlp; stream extraction itself stays anonymous.
-There are no known cases of accounts being banned for third-party players —
-but no guarantees; see the disclaimer above.
+Ordinary audio comes from YouTube Music's official page in a dedicated native
+WebView, including its normal ads and restrictions. Goosic does not promise
+that Google will permit every account or region to use an unofficial client,
+so the disclaimer still applies. Account cookies are never passed to yt-dlp,
+Deno, or the PO-token provider used for explicit playlist downloads.
 
 **Playback suddenly stopped working.**
-YouTube periodically changes its streaming internals. yt-dlp usually ships a
-fix within days, and the app picks it up automatically (it self-updates its
-yt-dlp copy every ~3 days). Restarting the app forces the check.
+Goosic retries a failed official WebPlayer once with a fresh playback WebView.
+If it still fails, check that `music.youtube.com` plays in your region/account,
+then restart Goosic and report the issue with the built-in diagnostics. Goosic
+does not silently switch ordinary playback to yt-dlp.
 
 **The AppImage won't run / complains about FUSE.**
 Some distros no longer ship `libfuse2` by default, which older AppImages need
@@ -95,10 +103,33 @@ Vanilla GNOME Shell doesn't show any application tray icons without an
 AppIndicator/KStatusNotifierItem extension installed (this isn't
 Goosic-specific — it affects every app that uses a tray icon on GNOME).
 
+## Playback privacy
+
+- Online playback loads `music.youtube.com` in a native WebView profile. Google
+  and YouTube receive the page, account, playback, and advertising information
+  their official web player normally receives.
+- The remote YouTube page cannot invoke unrestricted Tauri commands. Goosic
+  accepts only a small, secret, per-launch loopback playback-state bridge and
+  does not log its secret, playback URLs, cookies, tokens, or request bodies.
+- Signed-in WebView profiles and account cookies stay in Goosic's local app data.
+  They are never supplied to yt-dlp, Deno, or the PO-token provider.
+- Explicit playlist downloads are Premium-only. Legacy and invalid local files
+  remain visible through migration; invalid files are marked as needing repair
+  rather than silently removed.
+- Each download action re-verifies live Premium status. Its managed yt-dlp
+  process ignores user/system configuration and global plugins, so browser
+  cookies cannot be injected by a local yt-dlp config.
+- Offline audio is stored in durable application data by default; disposable
+  cover art stays in the operating system cache. Goosic non-destructively
+  imports finalized files from its legacy cache location.
+- Discord Rich Presence and playback notifications remain opt-in.
+
 ## Stack
 
 - **Shell:** Tauri 2 (Rust backend, system webview — WebView2 on Windows,
-  WebKitGTK on Linux)
+  WKWebView on macOS, WebKitGTK on Linux)
+- **Playback:** persistent official YouTube Music WebPlayer; managed yt-dlp only
+  for explicit Premium playlist downloads
 - **Frontend:** React 19 + TypeScript
 - **Build:** Vite 7
 - **Styling:** Tailwind CSS v4
@@ -143,16 +174,19 @@ src/
 │   ├── lyrics/          # LRCLIB / Musixmatch / Genius sources + LRC parser
 │   ├── store/           # Zustand stores
 │   ├── audio-engine.ts  # Playback engine
-│   ├── stream.ts        # Stream URL resolver (localhost proxy)
+│   ├── web-playback.ts  # Native official WebPlayer bridge
+│   ├── stream.ts        # Validated cache-only local playback URLs
+│   ├── offline-library.ts # Downloaded playlist/local-file mapping
 │   └── utils.ts         # cn() and friends
 └── hooks/
-src-tauri/               # Rust backend (axum stream proxy, cookies, tray)
+src-tauri/               # Rust backend (WebPlayer, offline proxy, cookies, tray)
 ```
 
 ## Credits
 
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp) — audio streaming
-- [Deno](https://github.com/denoland/deno) — MIT-licensed YouTube challenge runtime
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp) — explicit offline playlist downloads
+- [bgutil-ytdlp-pot-provider](https://github.com/Brainicism/bgutil-ytdlp-pot-provider) — PO tokens for explicit downloads
+- [Deno](https://github.com/denoland/deno) — MIT-licensed challenge runtime for explicit downloads
 - [LRCLIB](https://lrclib.net) — synced lyrics
 - Musixmatch and Genius — lyrics sources
 - [Tauri](https://tauri.app), [shadcn/ui](https://ui.shadcn.com),

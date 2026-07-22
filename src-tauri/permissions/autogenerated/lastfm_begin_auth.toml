@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-lastfm-begin-auth"
+description = "Enables the lastfm_begin_auth command without any pre-configured scope."
+commands.allow = ["lastfm_begin_auth"]
+
+[[permission]]
+identifier = "deny-lastfm-begin-auth"
+description = "Denies the lastfm_begin_auth command without any pre-configured scope."
+commands.deny = ["lastfm_begin_auth"]

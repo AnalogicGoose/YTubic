@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-discord-update"
+description = "Enables the discord_update command without any pre-configured scope."
+commands.allow = ["discord_update"]
+
+[[permission]]
+identifier = "deny-discord-update"
+description = "Denies the discord_update command without any pre-configured scope."
+commands.deny = ["discord_update"]

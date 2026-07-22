@@ -3,26 +3,37 @@ import { useShallow } from "zustand/react/shallow";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { fetchRadio } from "@/lib/innertube/radio";
-import { prefetchStream, saveTrackMeta, streamUrlFor } from "@/lib/stream";
+import {
+  isDefinitiveOfflineFileFailure,
+  offlineStreamUrlFor,
+} from "@/lib/stream";
 import { usePlaybackStore, type QueueTrack } from "@/lib/store/playback";
-import { usePremiumStore } from "@/lib/store/premium";
 import { useSettingsStore } from "@/lib/store/settings";
-import { openPremiumGate } from "@/lib/store/premium-gate";
+import { usePremiumStore } from "@/lib/store/premium";
 import { resolveStreamId, useTrackSourceStore } from "@/lib/store/track-source";
+import { markOfflineDownloadFailed } from "@/lib/store/offline-downloads";
 import { pickThumbnail } from "@/components/shared/thumbnail";
+import {
+  controlWebPlayer,
+  isSeekHoldResolved,
+  isWebPlayerHealthy,
+  loadWebTrack,
+  resetWebPlayer,
+  type WebPlaybackState,
+  type WebSeekHold,
+} from "@/lib/web-playback";
 
 /**
- * AudioEngine binds the playback store to a singleton HTMLAudioElement
- * and drives the OS media controls (Windows SMTC) from Rust via souvlaki (see
- * the media effects below and src-tauri/src/media.rs) rather than the webview's
- * own media session — that one runs in the WebView2 child process and shows up
- * as "Unknown app" in the Windows Now Playing tile.
+ * AudioEngine coordinates the official native WebPlayer for online tracks and
+ * a singleton HTMLAudioElement for explicit downloaded-file playback. It also
+ * drives OS media controls from Rust via souvlaki; the remote WebView's own
+ * media session is deliberately suppressed.
  *
  * Mount this hook once, near the root. It owns the <audio> element's lifecycle.
  */
 export function useAudioEngine() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  // Guard against stale stream resolutions when the user skips mid-fetch.
+  // Guard against stale local-file preflights when the user skips mid-fetch.
   const resolveTokenRef = useRef(0);
   // Counts how many tracks have failed in a row without a successful
   // play in between. Reset to 0 on `playing`. Used to short-circuit
@@ -32,22 +43,56 @@ export function useAudioEngine() {
   // Remembers the `videoId:index` we've already auto-retried once, so a
   // track that keeps failing falls through to the normal error/skip path
   // instead of looping. Cleared on a successful `playing`.
-  const retriedTrackRef = useRef<string | null>(null);
   // MediaError and play() rejection usually report the same failed load. Track
   // a generation so only the first signal drives retry/skip state.
   const loadGenerationRef = useRef(0);
   const activeMediaGenerationRef = useRef(-1);
   const handledFailureGenerationRef = useRef(-1);
-  const retryTimerRef = useRef<number | null>(null);
   const handlePlaybackFailureRef = useRef<
-    (message: string, generation?: number) => void
+    (
+      message: string,
+      generation?: number,
+      definitiveLocalFileFailure?: boolean,
+    ) => void
   >(() => {});
-  // Bumping this re-runs the resolve effect for the *current* track
-  // without any of its real deps changing — used to re-fetch a fresh
-  // stream URL after a transient failure (e.g. a googlevideo 403).
-  const [retryNonce, setRetryNonce] = useState(0);
+  // Bumping this recreates the official WebPlayer once for a genuine startup
+  // or content-process failure without changing the selected queue row.
+  const [webRetryNonce, setWebRetryNonce] = useState(0);
+  const webGenerationRef = useRef(0);
+  const webTrackKeyRef = useRef<string | null>(null);
+  const webRetriesRef = useRef(0);
+  const webFailureInFlightRef = useRef(false);
+  const handledWebEndedGenerationRef = useRef<number | null>(null);
+  const webRecoverySeekRef = useRef<number | null>(null);
+  // A seek reaches the official page asynchronously, so observer samples that
+  // were already in flight still carry the pre-seek position and would drag the
+  // progress bar back to it. Hold the requested position until a sample
+  // confirms it, the generation changes, or the attempt visibly fails.
+  const webSeekTargetRef = useRef<WebSeekHold | null>(null);
+  const webStartupTimerRef = useRef<number | null>(null);
+  const webStartupPhaseRef = useRef<"content" | "advertisement" | null>(null);
+  const failWebPlaybackRef = useRef<(message: string) => void>(() => {});
+  const selectionEpochRef = useRef(0);
+  const selectionInProgressRef = useRef(false);
+  // If the last queued track ends before its autoplay-radio request returns,
+  // remember the seed so the newly appended row can actually start. Without
+  // this hand-off `next()` stops at the old queue boundary and the later fetch
+  // merely adds silent rows behind it.
+  const endedRadioSeedRef = useRef<string | null>(null);
+  const directActivationSequenceRef = useRef(0);
+  const previousDesiredPlayingRef = useRef(false);
+  const [directActivation, setDirectActivation] = useState<{
+    videoId: string;
+    selectionRevision: number;
+    backend: "offline";
+    sequence: number;
+  } | null>(null);
 
-  handlePlaybackFailureRef.current = (message, generation) => {
+  handlePlaybackFailureRef.current = (
+    message,
+    generation,
+    definitiveLocalFileFailure = false,
+  ) => {
     const currentGeneration = generation ?? loadGenerationRef.current;
     if (currentGeneration !== loadGenerationRef.current) return;
     if (handledFailureGenerationRef.current === currentGeneration) return;
@@ -55,72 +100,22 @@ export function useAudioEngine() {
 
     const store = usePlaybackStore.getState();
     const current = store.index >= 0 ? store.queue[store.index] : undefined;
-    const key = current ? `${current.videoId}:${store.index}` : null;
-    const rateLimited = /HTTP 429|Too Many Requests|not a bot/i.test(message);
-    const unavailable =
-      /HTTP 422|Requested format is not available|DRM protected|video is not available/i.test(
-        message,
-      );
-
-    // These are deterministic server responses, not transient media-element
-    // failures. Repeating them after 400 ms either worsens YouTube's IP limit
-    // or wastes another full extraction on an unavailable track.
-    if (rateLimited) {
-      store.setStatus(
-        "error",
-        "YouTube is limiting this connection, so playback was paused. Wait a few minutes or use another network/VPN.",
-      );
-      store.setPlaying(false);
-      return;
+    if (store.backend !== "offline" || !current?.offlineVideoId) return;
+    if (definitiveLocalFileFailure) {
+      markOfflineDownloadFailed(current.offlineVideoId, message);
     }
-    if (unavailable) {
-      consecutiveErrorsRef.current += 1;
-      const hasNext = store.index >= 0 && store.index + 1 < store.queue.length;
-      if (store.playing && hasNext && consecutiveErrorsRef.current <= 3) {
-        store.next();
-      } else {
-        store.setStatus("error", message);
-        store.setPlaying(false);
-      }
-      return;
-    }
-
-    if (store.playing && key && retriedTrackRef.current !== key) {
-      retriedTrackRef.current = key;
-      store.setStatus("loading");
-      if (retryTimerRef.current !== null) {
-        window.clearTimeout(retryTimerRef.current);
-      }
-      retryTimerRef.current = window.setTimeout(() => {
-        retryTimerRef.current = null;
-        const latest = usePlaybackStore.getState();
-        const latestTrack =
-          latest.index >= 0 ? latest.queue[latest.index] : undefined;
-        const latestKey = latestTrack
-          ? `${latestTrack.videoId}:${latest.index}`
-          : null;
-        // A delayed retry must never tear down a new track selected while the
-        // old source was failing.
-        if (latest.playing && latestKey === key) {
-          setRetryNonce((nonce) => nonce + 1);
-        }
-      }, 400);
-      return;
-    }
-
-    store.setStatus("error", message);
     consecutiveErrorsRef.current += 1;
     const hasNext = store.index >= 0 && store.index + 1 < store.queue.length;
     if (store.playing && hasNext && consecutiveErrorsRef.current <= 3) {
       store.next();
       return;
     }
-    if (consecutiveErrorsRef.current > 3) {
-      store.setStatus(
-        "error",
-        "YouTube is limiting this connection, so playback was paused. Try again later or use another network/VPN.",
-      );
-    }
+    store.setStatus(
+      "error",
+      definitiveLocalFileFailure
+        ? `This downloaded file could not be decoded. It was kept on disk so you can repair or remove it later. ${message}`
+        : `This downloaded file could not be opened right now. It remains on disk. ${message}`,
+    );
     store.setPlaying(false);
   };
 
@@ -129,14 +124,10 @@ export function useAudioEngine() {
     if (audioRef.current) return;
     const el = new Audio();
     el.preload = "auto";
-    // Note: do NOT set crossOrigin — googlevideo.com doesn't return CORS
-    // headers, and setting it makes the media fail to load in the webview.
+    // The local loopback server already constrains access through a per-launch
+    // path secret; no cross-origin mode is needed for HTMLAudio.
     audioRef.current = el;
     return () => {
-      if (retryTimerRef.current !== null) {
-        window.clearTimeout(retryTimerRef.current);
-        retryTimerRef.current = null;
-      }
       el.pause();
       el.src = "";
       audioRef.current = null;
@@ -189,7 +180,16 @@ export function useAudioEngine() {
       if (activeMediaGenerationRef.current !== loadGenerationRef.current) {
         return;
       }
-      store().next();
+      const current = store();
+      const currentTrack =
+        current.index >= 0 ? current.queue[current.index] : undefined;
+      endedRadioSeedRef.current =
+        current.autoRadio &&
+        current.repeat === "off" &&
+        current.index === current.queue.length - 1
+          ? (currentTrack?.videoId ?? null)
+          : null;
+      current.next();
     };
     const onError = () => {
       const mediaErr = el.error;
@@ -204,13 +204,15 @@ export function useAudioEngine() {
             mediaErr.message ? `: ${mediaErr.message}` : ""
           }`
         : "Unknown audio error";
-      if (import.meta.env.DEV) {
-        console.error("[audio] element error:", msg, "src=", el.currentSrc);
-      }
+      if (import.meta.env.DEV) console.error("[audio] element error:", msg);
 
       const generation = activeMediaGenerationRef.current;
       if (generation >= 0) {
-        handlePlaybackFailureRef.current(msg, generation);
+        handlePlaybackFailureRef.current(
+          msg,
+          generation,
+          mediaErr?.code === 3 || mediaErr?.code === 4,
+        );
       }
     };
     const onPlaying = () => {
@@ -220,7 +222,6 @@ export function useAudioEngine() {
       consecutiveErrorsRef.current = 0;
       // Track played successfully — allow a fresh auto-retry if it later
       // fails again (e.g. a mid-stream drop on a much later replay).
-      retriedTrackRef.current = null;
       store().setStatus("ready");
     };
     const onWaiting = () => {
@@ -250,102 +251,550 @@ export function useAudioEngine() {
     };
   }, []);
 
-  // React to current-track changes → resolve stream → set src.
-  const { videoId, track, index } = usePlaybackStore(
+  // React to current-track changes and choose exactly one playback owner.
+  const { videoId, track, index, loadRevision } = usePlaybackStore(
     useShallow((s) => {
       const t = s.index >= 0 ? s.queue[s.index] : undefined;
-      return { videoId: t?.videoId, track: t, index: s.index };
+      return {
+        videoId: t?.videoId,
+        track: t,
+        index: s.index,
+        loadRevision: s.loadRevision,
+      };
     }),
   );
 
-  // Substitute the streaming videoId via the user's per-track source
+  // Substitute the WebPlayer videoId via the user's per-track source
   // preference (Song ↔ Music Video). Subscribing here means the effect
-  // below re-runs and re-resolves the stream when the user toggles the
-  // source on the currently playing track.
+  // below reloads the official page when the user toggles the source on the
+  // currently playing track.
   const streamVideoId = useTrackSourceStore((s) =>
     videoId ? resolveStreamId(videoId, s.byVideoId) : undefined,
   );
-
-  // Reactive Premium check for the gate below. Subscribing (rather than
-  // calling isPremium() inside the effect) makes the resolve effect
-  // re-run when the status lands after sign-in / the launch-time probe.
-  // Without this, a track gated during the "still checking" window would
-  // sit silent until the user re-picked it.
+  const playbackMode = track?.playbackMode ?? "online";
+  const offlineVideoId =
+    playbackMode === "offline" ? track?.offlineVideoId : undefined;
+  const backend = usePlaybackStore((s) => s.backend);
+  const webviewReady = usePlaybackStore((s) => s.webviewReady);
+  const playing = usePlaybackStore((s) => s.playing);
   const premiumOk = usePremiumStore((s) => s.status === "premium");
+  const offlinePlaybackAllowed = playbackMode !== "offline" || premiumOk;
+
+  useEffect(() => {
+    if (
+      endedRadioSeedRef.current !== null &&
+      endedRadioSeedRef.current !== videoId
+    ) {
+      endedRadioSeedRef.current = null;
+    }
+  }, [videoId, index]);
+
+  failWebPlaybackRef.current = (message) => {
+    if (webFailureInFlightRef.current) return;
+    webFailureInFlightRef.current = true;
+    if (webStartupTimerRef.current !== null) {
+      window.clearTimeout(webStartupTimerRef.current);
+      webStartupTimerRef.current = null;
+    }
+    webStartupPhaseRef.current = null;
+    if (webRetriesRef.current === 0) {
+      webRetriesRef.current = 1;
+      selectionInProgressRef.current = true;
+      const store = usePlaybackStore.getState();
+      if (!store.advertisement && store.position > 0) {
+        webRecoverySeekRef.current = store.position;
+      }
+      const failedGeneration = webGenerationRef.current;
+      void resetWebPlayer()
+        .then(() => {
+          webFailureInFlightRef.current = false;
+          const store = usePlaybackStore.getState();
+          if (
+            failedGeneration === webGenerationRef.current &&
+            store.backend === "webview"
+          ) {
+            setWebRetryNonce((value) => value + 1);
+          } else {
+            selectionInProgressRef.current = false;
+          }
+        })
+        .catch((error) => {
+          webFailureInFlightRef.current = false;
+          selectionInProgressRef.current = false;
+          const detail = error instanceof Error ? error.message : String(error);
+          const store = usePlaybackStore.getState();
+          store.setStatus(
+            "error",
+            `Could not restart the official player: ${detail}`,
+          );
+          store.setPlaying(false);
+        });
+      return;
+    }
+    webFailureInFlightRef.current = false;
+    selectionInProgressRef.current = false;
+    const store = usePlaybackStore.getState();
+    store.setBackend("webview", message);
+    store.setStatus(
+      "error",
+      `The official YouTube Music player could not start. ${message}`,
+    );
+    store.setPlaying(false);
+  };
+
+  // Remote page -> authoritative playback store. The native bridge has
+  // already validated origin, payload size, generation, and video ID.
+  useEffect(() => {
+    let cancelled = false;
+    let dispose: (() => void) | undefined;
+    void listen<WebPlaybackState>("web-player-state", ({ payload }) => {
+      if (payload.generation !== webGenerationRef.current) return;
+      const store = usePlaybackStore.getState();
+      if (store.backend !== "webview" || selectionInProgressRef.current) return;
+      if (payload.error) {
+        failWebPlaybackRef.current(payload.error);
+        return;
+      }
+      const recoverySeek =
+        payload.ready && !payload.advertisement
+          ? webRecoverySeekRef.current
+          : null;
+      // Drop position samples the official page produced before it applied a
+      // requested seek. Without this the bar snaps back to the old time for a
+      // few frames and then jumps forward again.
+      const seekTarget = webSeekTargetRef.current;
+      let positionIsAuthoritative = true;
+      if (seekTarget) {
+        if (isSeekHoldResolved(seekTarget, payload, Date.now())) {
+          webSeekTargetRef.current = null;
+        } else {
+          positionIsAuthoritative = false;
+        }
+      }
+      store.setWebviewState(payload.ready, payload.advertisement);
+      if (!payload.advertisement) {
+        if (payload.duration > 0) store.setDuration(payload.duration);
+        if (recoverySeek === null && positionIsAuthoritative) {
+          store.setPosition(payload.position);
+        }
+      }
+      if (payload.advertisement) {
+        // A healthy official-page advertisement has no arbitrary deadline.
+        // Reloading after two minutes could terminate a legitimate long or
+        // multi-ad break. Heartbeat/error handling still detects a dead page.
+        if (webStartupTimerRef.current !== null) {
+          window.clearTimeout(webStartupTimerRef.current);
+          webStartupTimerRef.current = null;
+        }
+        webStartupPhaseRef.current = "advertisement";
+      } else if (webStartupPhaseRef.current === "advertisement") {
+        webStartupPhaseRef.current = "content";
+        const generation = payload.generation;
+        webStartupTimerRef.current = window.setTimeout(() => {
+          if (generation === webGenerationRef.current) {
+            failWebPlaybackRef.current(
+              "Requested content did not start after the advertisement",
+            );
+          }
+        }, 12_000);
+      }
+      // Advance before reconciling desired transport. Sending `play` to an
+      // ended generation can briefly restart the old page (or the final song)
+      // before the queue selection effect loads/stops the next owner.
+      if (payload.ended && !payload.advertisement) {
+        if (handledWebEndedGenerationRef.current === payload.generation) return;
+        handledWebEndedGenerationRef.current = payload.generation;
+        const current = store.index >= 0 ? store.queue[store.index] : undefined;
+        endedRadioSeedRef.current =
+          store.autoRadio &&
+          store.repeat === "off" &&
+          store.index === store.queue.length - 1
+            ? (current?.videoId ?? null)
+            : null;
+        store.next();
+        return;
+      }
+      if (payload.ready) {
+        const startupSucceeded =
+          !payload.advertisement && (payload.playing || !store.playing);
+        if (startupSucceeded && webStartupTimerRef.current !== null) {
+          window.clearTimeout(webStartupTimerRef.current);
+          webStartupTimerRef.current = null;
+          webStartupPhaseRef.current = null;
+        }
+        store.setStatus(
+          payload.buffering || (store.playing && !payload.playing)
+            ? "loading"
+            : "ready",
+        );
+        if (!store.playing && payload.playing) {
+          // The user can press Pause while a navigation/load is still in
+          // flight. The load request necessarily carries an earlier snapshot
+          // of the desired transport, so reconcile both directions once the
+          // new document reports ready. Without this symmetric branch the
+          // remote page could keep playing while Goosic's UI was paused.
+          void controlWebPlayer(payload.generation, "pause").catch(() => {});
+        } else if (
+          store.playing &&
+          !payload.playing &&
+          !payload.buffering &&
+          // A finished track is paused at its end. Resuming it there rewinds
+          // the official page to zero and restarts the song Goosic is about to
+          // advance past, so leave the transport alone until `ended` lands.
+          !payload.finished
+        ) {
+          void controlWebPlayer(payload.generation, "play").catch(() => {});
+        }
+        if (recoverySeek !== null) {
+          webRecoverySeekRef.current = null;
+          webSeekTargetRef.current = {
+            generation: payload.generation,
+            position: recoverySeek,
+            requestedAt: Date.now(),
+          };
+          void controlWebPlayer(payload.generation, "seek", recoverySeek)
+            .then(() => {
+              if (usePlaybackStore.getState().playing) {
+                return controlWebPlayer(payload.generation, "play");
+              }
+            })
+            .catch(() => {});
+        }
+      }
+    }).then((unlisten) => {
+      if (cancelled) unlisten();
+      else dispose = unlisten;
+    });
+    return () => {
+      cancelled = true;
+      dispose?.();
+    };
+  }, []);
+
+  // Account profiles are hard isolation boundaries. `login-success` fires as
+  // soon as native code makes the new profile active, before account-menu
+  // backfill can emit `accounts-changed`; reset immediately so failed/slow
+  // metadata fetching can never leave the old account's player alive.
+  useEffect(() => {
+    let cancelled = false;
+    const disposers: (() => void)[] = [];
+    const isolatePlayer = (clearSelection: boolean) => {
+      ++selectionEpochRef.current;
+      ++webGenerationRef.current;
+      ++resolveTokenRef.current;
+      activeMediaGenerationRef.current = -1;
+      selectionInProgressRef.current = true;
+      setDirectActivation(null);
+      webTrackKeyRef.current = null;
+      webRetriesRef.current = 0;
+      webFailureInFlightRef.current = false;
+      webRecoverySeekRef.current = null;
+      webSeekTargetRef.current = null;
+      if (clearSelection) {
+        usePlaybackStore.getState().clearQueue(true);
+      }
+      void resetWebPlayer()
+        .then(() => {
+          selectionInProgressRef.current = false;
+          if (!clearSelection) setWebRetryNonce((value) => value + 1);
+        })
+        .catch((error) => {
+          selectionInProgressRef.current = false;
+          const detail = error instanceof Error ? error.message : String(error);
+          const store = usePlaybackStore.getState();
+          store.setStatus(
+            "error",
+            `Could not change playback account: ${detail}`,
+          );
+          store.setPlaying(false);
+        });
+    };
+    void listen("login-success", () => isolatePlayer(true)).then((unlisten) => {
+      if (cancelled) unlisten();
+      else disposers.push(unlisten);
+    });
+    void listen("accounts-changed", () => isolatePlayer(true)).then(
+      (unlisten) => {
+        if (cancelled) unlisten();
+        else disposers.push(unlisten);
+      },
+    );
+    return () => {
+      cancelled = true;
+      for (const dispose of disposers) dispose();
+    };
+  }, []);
+
+  // Online rows always use the official YouTube Music page. A local audio
+  // element is selected only for queue rows created by an explicit
+  // "Play downloaded" action and carrying the exact finalized file ID.
+  useEffect(() => {
+    const selectedVideoId =
+      playbackMode === "offline" ? offlineVideoId : streamVideoId;
+    const key = selectedVideoId
+      ? `${playbackMode}:${selectedVideoId}:${loadRevision}`
+      : null;
+    if (key !== webTrackKeyRef.current) {
+      webTrackKeyRef.current = key;
+      webRetriesRef.current = 0;
+      webFailureInFlightRef.current = false;
+      webRecoverySeekRef.current = null;
+      webSeekTargetRef.current = null;
+    }
+    const selection = ++selectionEpochRef.current;
+    // Invalidate every pending local-file preflight before either owner can be
+    // selected. A late offline response must never restore its src after an
+    // online/account/entitlement transition.
+    ++resolveTokenRef.current;
+    activeMediaGenerationRef.current = -1;
+    selectionInProgressRef.current = true;
+    setDirectActivation(null);
+    if (webStartupTimerRef.current !== null) {
+      window.clearTimeout(webStartupTimerRef.current);
+      webStartupTimerRef.current = null;
+    }
+    webStartupPhaseRef.current = null;
+    // Stop both possible owners before probing. Backend is committed only
+    // after the losing owner has relinquished audio.
+    const el = audioRef.current;
+    if (el) {
+      el.pause();
+      el.removeAttribute("src");
+      el.load();
+    }
+    void controlWebPlayer(webGenerationRef.current, "pause").catch(() => {});
+    if (!selectedVideoId || !key) {
+      ++webGenerationRef.current;
+      void resetWebPlayer()
+        .then(() => {
+          if (selection === selectionEpochRef.current) {
+            selectionInProgressRef.current = false;
+          }
+        })
+        .catch((error) => {
+          if (selection !== selectionEpochRef.current) return;
+          selectionInProgressRef.current = false;
+          const detail = error instanceof Error ? error.message : String(error);
+          const store = usePlaybackStore.getState();
+          store.setStatus(
+            "error",
+            `Could not stop the official player: ${detail}`,
+          );
+          store.setPlaying(false);
+        });
+      return;
+    }
+
+    const store = usePlaybackStore.getState();
+    // A persisted queue is restored paused with `status: idle`. Keep its card
+    // visible, but do not contact YouTube or instantiate the remote playback
+    // document until the user actually presses Play. User-driven selections
+    // enter as `loading`, so a deliberately selected paused row still loads.
+    if (
+      playbackMode === "online" &&
+      store.status === "idle" &&
+      !store.playing
+    ) {
+      store.setBackend("webview");
+      selectionInProgressRef.current = false;
+      return;
+    }
+    store.setStatus("loading");
+    store.setStreamUrl(undefined);
+    store.setWebviewState(false, false);
+    let disposed = false;
+    void (async () => {
+      if (playbackMode === "offline") {
+        ++webGenerationRef.current;
+        await resetWebPlayer();
+        if (disposed || selection !== selectionEpochRef.current) return;
+        if (!offlinePlaybackAllowed) {
+          store.setBackend(
+            "offline",
+            "Premium is required for offline playback",
+          );
+          store.setStatus(
+            "error",
+            "Reconnect and verify YouTube Music Premium to play downloaded music.",
+          );
+          store.setPlaying(false);
+          selectionInProgressRef.current = false;
+          return;
+        }
+        store.setBackend("offline");
+        setDirectActivation({
+          videoId: selectedVideoId,
+          selectionRevision: loadRevision,
+          backend: "offline",
+          sequence: ++directActivationSequenceRef.current,
+        });
+        selectionInProgressRef.current = false;
+        return;
+      }
+      if (disposed || selection !== selectionEpochRef.current) return;
+      const generation = ++webGenerationRef.current;
+      handledWebEndedGenerationRef.current = null;
+      store.setBackend("webview");
+      await loadWebTrack({
+        videoId: selectedVideoId,
+        generation,
+        playing: store.playing,
+        volume: Math.max(0, Math.min(1, store.volume)) ** 3,
+        muted: store.muted,
+      });
+      if (
+        disposed ||
+        selection !== selectionEpochRef.current ||
+        generation !== webGenerationRef.current
+      )
+        return;
+      selectionInProgressRef.current = false;
+      // `playing` may have changed while native code was creating or
+      // navigating the WebView. Re-apply the latest store intent after the
+      // generation is committed instead of trusting the snapshot passed to
+      // `loadWebTrack`. The ready-state listener above repeats this check in
+      // case this eval lands before the new document's observer initializes.
+      const desiredPlaying = usePlaybackStore.getState().playing;
+      void controlWebPlayer(
+        generation,
+        desiredPlaying ? "play" : "pause",
+      ).catch((error) => {
+        if (
+          desiredPlaying &&
+          generation === webGenerationRef.current &&
+          usePlaybackStore.getState().playing
+        ) {
+          failWebPlaybackRef.current(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+      });
+      if (webStartupTimerRef.current !== null) {
+        window.clearTimeout(webStartupTimerRef.current);
+      }
+      webStartupPhaseRef.current = "content";
+      webStartupTimerRef.current = window.setTimeout(() => {
+        if (generation === webGenerationRef.current) {
+          failWebPlaybackRef.current("Official player startup timed out");
+        }
+      }, 12_000);
+    })().catch((error) => {
+      if (disposed || selection !== selectionEpochRef.current) return;
+      selectionInProgressRef.current = false;
+      const detail = error instanceof Error ? error.message : String(error);
+      if (playbackMode === "offline") {
+        store.setStatus("error", `Could not open downloaded audio: ${detail}`);
+        store.setPlaying(false);
+      } else {
+        failWebPlaybackRef.current(detail);
+      }
+    });
+    const cleanupResolveTokenRef = resolveTokenRef;
+    return () => {
+      disposed = true;
+      ++cleanupResolveTokenRef.current;
+      activeMediaGenerationRef.current = -1;
+      if (webStartupTimerRef.current !== null) {
+        window.clearTimeout(webStartupTimerRef.current);
+        webStartupTimerRef.current = null;
+      }
+      webStartupPhaseRef.current = null;
+    };
+  }, [
+    streamVideoId,
+    offlineVideoId,
+    playbackMode,
+    loadRevision,
+    webRetryNonce,
+    offlinePlaybackAllowed,
+  ]);
+
+  // A live native window is not enough: an off-screen WebView can suspend or
+  // lose its content process while still existing in Tauri. Once bridge state
+  // has made the player ready, require a recent generation-scoped heartbeat.
+  useEffect(() => {
+    if (backend !== "webview" || !playing || !webviewReady) return;
+    let cancelled = false;
+    let checking = false;
+    const check = async () => {
+      if (checking) return;
+      checking = true;
+      const healthy = await isWebPlayerHealthy().catch(() => false);
+      checking = false;
+      if (cancelled) return;
+      const store = usePlaybackStore.getState();
+      if (
+        !healthy &&
+        store.backend === "webview" &&
+        store.playing &&
+        store.webviewReady
+      ) {
+        failWebPlaybackRef.current("Official player stopped responding");
+      }
+    };
+    const timer = window.setInterval(() => void check(), 4_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [backend, playing, webviewReady]);
 
   useEffect(() => {
     const el = audioRef.current;
     if (!el) return;
+    if (
+      !directActivation ||
+      directActivation.videoId !== offlineVideoId ||
+      directActivation.selectionRevision !== loadRevision
+    ) {
+      ++resolveTokenRef.current;
+      activeMediaGenerationRef.current = -1;
+      el.pause();
+      el.removeAttribute("src");
+      el.load();
+      return;
+    }
+    const activeBackend = directActivation.backend;
+    if (usePlaybackStore.getState().backend !== activeBackend) return;
     const token = ++resolveTokenRef.current;
     const generation = ++loadGenerationRef.current;
     activeMediaGenerationRef.current = -1;
     handledFailureGenerationRef.current = -1;
-    if (retryTimerRef.current !== null) {
-      window.clearTimeout(retryTimerRef.current);
-      retryTimerRef.current = null;
-    }
-    // Stop the previous track immediately. Without this the old src keeps
-    // playing through the streamUrlFor() round-trip (~50–500 ms), so the
-    // user hears the tail of track A bleed into the start of track B.
+    // Stop the previous local file before the cache-only preflight so two
+    // downloaded tracks can never overlap during a quick queue change.
     el.pause();
-    if (!streamVideoId) {
+    if (!offlineVideoId) {
       el.removeAttribute("src");
       el.load();
       usePlaybackStore.getState().setStreamUrl(undefined);
       return;
     }
-    // Premium gate: signed-out / Free accounts browse but don't stream.
-    // Every entry path (track clicks, media keys, tray, floating window,
-    // restored queues) funnels through this effect, so one check here
-    // guarantees no yt-dlp spawn and no cache write happens without
-    // Premium. A deliberate play attempt (playing=true) gets the
-    // explainer dialog; the silent preload of a restored queue
-    // (playing=false) just parks the track.
-    if (!premiumOk) {
-      el.removeAttribute("src");
-      el.load();
-      const store = usePlaybackStore.getState();
-      store.setStreamUrl(undefined);
-      store.setStatus("idle");
-      if (store.playing) {
-        store.setPlaying(false);
-        openPremiumGate();
-      }
-      return;
-    }
     // Drop the previous track's src immediately. Otherwise a paused→playing
     // transition committed together with the track change (playNow/goTo set
     // playing: true) makes the [playing] effect below re-play the OLD src
-    // for the duration of the streamUrlFor() round-trip.
+    // while the cache-only preflight is still running.
     el.removeAttribute("src");
 
     usePlaybackStore.getState().setStatus("loading");
 
-    // Persist this track's title/artist beside its cache file so the
-    // Storage tab can name it without depending on the library walk.
-    // Read from the store imperatively (like the rest of this effect) so
-    // the track object doesn't have to join the dependency array.
-    {
-      const st = usePlaybackStore.getState();
-      void saveTrackMeta(
-        streamVideoId,
-        st.index >= 0 ? st.queue[st.index] : undefined,
-      );
-    }
-
-    // Playback goes through our local streaming HTTP server. The preflight
-    // waits for yt-dlp to finish and validates one byte through the same Range
-    // path HTMLAudio will use, so resolver failures stay diagnosable and
-    // MP4/M4A files have their final metadata before Chromium decodes them.
-    const retryKey = videoId ? `${videoId}:${index}` : null;
-    streamUrlFor(streamVideoId, {
-      refresh: retryKey !== null && retriedTrackRef.current === retryKey,
-    })
+    // Playback goes through the cache-only local HTTP route. Its one-byte
+    // Range preflight proves the exact finalized file remains valid; this path
+    // can never start yt-dlp or repair/download implicitly.
+    offlineStreamUrlFor(offlineVideoId)
       .then((src) => {
         if (token !== resolveTokenRef.current) return;
-        if (import.meta.env.DEV) {
-          console.debug("[audio] setting src for", videoId, "→", src);
-        }
+        const currentStore = usePlaybackStore.getState();
+        const currentTrack =
+          currentStore.index >= 0
+            ? currentStore.queue[currentStore.index]
+            : undefined;
+        if (
+          currentStore.backend !== "offline" ||
+          (currentTrack?.playbackMode ?? "online") !== "offline" ||
+          currentTrack?.offlineVideoId !== offlineVideoId ||
+          usePremiumStore.getState().status !== "premium"
+        )
+          return;
         activeMediaGenerationRef.current = generation;
         el.src = src;
         usePlaybackStore.getState().setStreamUrl(src);
@@ -363,37 +812,105 @@ export function useAudioEngine() {
             handlePlaybackFailureRef.current(
               e?.message ?? String(e),
               generation,
+              e?.name === "NotSupportedError",
             );
           });
         }
       })
       .catch((e: Error) => {
         if (token !== resolveTokenRef.current) return;
-        handlePlaybackFailureRef.current(e.message, generation);
+        handlePlaybackFailureRef.current(
+          e.message,
+          generation,
+          isDefinitiveOfflineFileFailure(e),
+        );
       });
-    // `index` is in the deps so advancing to a different queue slot that
-    // holds the *same* videoId (a duplicate in a playlist, radio dupes)
-    // still re-resolves and plays instead of stalling on "loading" —
-    // videoId/streamVideoId alone wouldn't change. Repeating a *single*
-    // track (repeat-one, or repeat-all on a 1-track queue) keeps the same
-    // index, so the store replays it via pendingSeek instead — see
-    // `next()` in store/playback.ts. `premiumOk` so that gaining Premium
-    // (sign-in, status re-check) re-resolves a track the gate parked.
-    // `retryNonce` so the error handler can force a fresh stream-URL fetch
-    // for the current track after a transient failure without changing id.
-  }, [streamVideoId, videoId, index, premiumOk, retryNonce]);
+    const cleanupResolveTokenRef = resolveTokenRef;
+    return () => {
+      if (cleanupResolveTokenRef.current === token) {
+        ++cleanupResolveTokenRef.current;
+      }
+      activeMediaGenerationRef.current = -1;
+    };
+  }, [offlineVideoId, loadRevision, directActivation]);
 
   // Play / pause follow store.
-  const playing = usePlaybackStore((s) => s.playing);
   useEffect(() => {
     const el = audioRef.current;
     if (!el) return;
-    if (playing && !premiumOk) {
-      // Resume attempts (play button, Space, SMTC play) on a gated track
-      // never reach the resolve effect (its deps don't include
-      // `playing`), so intercept them here.
-      usePlaybackStore.getState().setPlaying(false);
-      openPremiumGate();
+    const wasPlaying = previousDesiredPlayingRef.current;
+    previousDesiredPlayingRef.current = playing;
+    if (selectionInProgressRef.current) return;
+    if (backend === "webview") {
+      const store = usePlaybackStore.getState();
+      if (playing && store.status === "idle") {
+        store.setStatus("loading");
+        setWebRetryNonce((value) => value + 1);
+        return;
+      }
+      if (playing && store.status === "error") {
+        selectionInProgressRef.current = true;
+        webRetriesRef.current = 0;
+        webFailureInFlightRef.current = false;
+        webRecoverySeekRef.current = null;
+        webSeekTargetRef.current = null;
+        void resetWebPlayer()
+          .then(() => {
+            selectionInProgressRef.current = false;
+            setWebRetryNonce((value) => value + 1);
+          })
+          .catch((error) => {
+            selectionInProgressRef.current = false;
+            const detail =
+              error instanceof Error ? error.message : String(error);
+            store.setStatus(
+              "error",
+              `Could not restart the official player: ${detail}`,
+            );
+            store.setPlaying(false);
+          });
+        return;
+      }
+      const generation = webGenerationRef.current;
+      if (
+        playing &&
+        !wasPlaying &&
+        !store.advertisement &&
+        store.status !== "idle" &&
+        store.status !== "error"
+      ) {
+        store.setStatus("loading");
+        if (webStartupTimerRef.current !== null) {
+          window.clearTimeout(webStartupTimerRef.current);
+        }
+        webStartupPhaseRef.current = "content";
+        webStartupTimerRef.current = window.setTimeout(() => {
+          if (
+            generation === webGenerationRef.current &&
+            usePlaybackStore.getState().playing
+          ) {
+            failWebPlaybackRef.current(
+              "Official player did not resume the requested content",
+            );
+          }
+        }, 12_000);
+      }
+      void controlWebPlayer(generation, playing ? "play" : "pause").catch(
+        (error) => {
+          // A rejected resume is actionable; without this, healthy bridge
+          // heartbeats could leave the UI loading forever. Pausing and ad
+          // transport remain governed by subsequent authoritative samples.
+          if (
+            playing &&
+            generation === webGenerationRef.current &&
+            !usePlaybackStore.getState().advertisement
+          ) {
+            failWebPlaybackRef.current(
+              error instanceof Error ? error.message : String(error),
+            );
+          }
+        },
+      );
       return;
     }
     if (!el.src) return;
@@ -401,12 +918,16 @@ export function useAudioEngine() {
       const generation = activeMediaGenerationRef.current;
       void el.play().catch((e) => {
         if (e?.name === "AbortError") return;
-        handlePlaybackFailureRef.current(e?.message ?? String(e), generation);
+        handlePlaybackFailureRef.current(
+          e?.message ?? String(e),
+          generation,
+          e?.name === "NotSupportedError",
+        );
       });
     } else {
       el.pause();
     }
-  }, [playing, premiumOk]);
+  }, [playing, backend]);
 
   // Volume / mute follow store.
   const volume = usePlaybackStore((s) => s.volume);
@@ -421,13 +942,50 @@ export function useAudioEngine() {
     const clamped = Math.max(0, Math.min(1, volume));
     el.volume = clamped ** 3;
     el.muted = muted;
-  }, [volume, muted]);
+    if (backend === "webview") {
+      void controlWebPlayer(
+        webGenerationRef.current,
+        "volume",
+        clamped ** 3,
+      ).catch(() => {});
+      void controlWebPlayer(
+        webGenerationRef.current,
+        "mute",
+        muted ? 1 : 0,
+      ).catch(() => {});
+    }
+  }, [volume, muted, backend]);
 
   // Handle seek requests.
   const pendingSeek = usePlaybackStore((s) => s.pendingSeek);
   useEffect(() => {
     const el = audioRef.current;
     if (!el || pendingSeek === undefined) return;
+    if (backend === "webview") {
+      if (!usePlaybackStore.getState().advertisement) {
+        const generation = webGenerationRef.current;
+        webSeekTargetRef.current = {
+          generation,
+          position: pendingSeek,
+          requestedAt: Date.now(),
+        };
+        void controlWebPlayer(generation, "seek", pendingSeek)
+          .then(() => {
+            if (usePlaybackStore.getState().playing) {
+              return controlWebPlayer(generation, "play");
+            }
+          })
+          .catch(() => {
+            // The page never received the seek, so nothing will confirm the
+            // held position — let live samples drive the bar again.
+            if (webSeekTargetRef.current?.generation === generation) {
+              webSeekTargetRef.current = null;
+            }
+          });
+      }
+      usePlaybackStore.getState().clearPendingSeek();
+      return;
+    }
     try {
       el.currentTime = pendingSeek;
     } catch {
@@ -443,10 +1001,14 @@ export function useAudioEngine() {
       const generation = activeMediaGenerationRef.current;
       void el.play().catch((e) => {
         if (e?.name === "AbortError") return;
-        handlePlaybackFailureRef.current(e?.message ?? String(e), generation);
+        handlePlaybackFailureRef.current(
+          e?.message ?? String(e),
+          generation,
+          e?.name === "NotSupportedError",
+        );
       });
     }
-  }, [pendingSeek]);
+  }, [pendingSeek, backend]);
 
   // OS media controls (Windows SMTC) are driven from Rust via souvlaki, not
   // navigator.mediaSession — the webview's own media session shows up as
@@ -517,68 +1079,34 @@ export function useAudioEngine() {
     };
   }, []);
 
-  // Prefetch the next queued track in the background while the current
-  // one plays. First-time plays take ~2s (yt-dlp resolve + first audio
-  // chunk); by the time the user hits "next" the file is cached on
-  // disk and playback starts instantly with full seek support.
-  const status = usePlaybackStore((s) => s.status);
-  const { nextVideoId } = usePlaybackStore(
-    useShallow((s) => ({
-      nextVideoId:
-        s.index >= 0 && s.index + 1 < s.queue.length
-          ? s.queue[s.index + 1].videoId
-          : undefined,
-    })),
-  );
-  // Substitute via source-prefs for the prefetch too — otherwise we'd
-  // warm the cache for the wrong stream when the user has switched the
-  // upcoming track to its video version.
-  const nextStreamVideoId = useTrackSourceStore((s) =>
-    nextVideoId ? resolveStreamId(nextVideoId, s.byVideoId) : undefined,
-  );
-  useEffect(() => {
-    if (status !== "ready") return;
-    if (!nextStreamVideoId) return;
-    // Leave breathing room after the active download. YouTube rate-limits
-    // guest sessions by request volume; immediately launching another yt-dlp
-    // process after every play makes 429s much more likely. Ten seconds still
-    // warms normal-length tracks long before they end.
-    const timer = window.setTimeout(() => {
-      void prefetchStream(nextStreamVideoId);
-      // Label the prefetched file too — same reasoning as the play path.
-      const st = usePlaybackStore.getState();
-      void saveTrackMeta(
-        nextStreamVideoId,
-        st.index >= 0 && st.index + 1 < st.queue.length
-          ? st.queue[st.index + 1]
-          : undefined,
-      );
-    }, 10_000);
-    return () => window.clearTimeout(timer);
-  }, [status, nextStreamVideoId]);
-
   // Auto-extend the queue with radio tracks when we're near the end, so
   // playback continues past the explicit queue.
   const autoRadio = usePlaybackStore((s) => s.autoRadio);
-  const { qLen, qIndex, seedVideoId, repeat } = usePlaybackStore(
-    useShallow((s) => ({
-      qLen: s.queue.length,
-      qIndex: s.index,
-      seedVideoId: s.index >= 0 ? s.queue[s.index]?.videoId : undefined,
-      repeat: s.repeat,
-    })),
-  );
+  const { qLen, qIndex, seedVideoId, repeat, radioQueueRevision } =
+    usePlaybackStore(
+      useShallow((s) => ({
+        qLen: s.queue.length,
+        qIndex: s.index,
+        seedVideoId: s.index >= 0 ? s.queue[s.index]?.videoId : undefined,
+        repeat: s.repeat,
+        radioQueueRevision: s.loadRevision,
+      })),
+    );
   const radioFetchedForRef = useRef<string | undefined>(undefined);
   useEffect(() => {
-    if (!autoRadio) return;
+    if (!autoRadio || repeat !== "off") {
+      radioFetchedForRef.current = undefined;
+      endedRadioSeedRef.current = null;
+      return;
+    }
     if (qIndex < 0 || !seedVideoId) return;
     // Only fire when the current track is the last queued one.
     if (qIndex < qLen - 1) return;
     // Loop takes priority over radio: never extend the queue while repeat
     // is on, so `next()`'s own loop logic wins instead of racing with us.
-    if (repeat !== "off") return;
-    if (radioFetchedForRef.current === seedVideoId) return;
-    radioFetchedForRef.current = seedVideoId;
+    const requestKey = `${seedVideoId}:${radioQueueRevision}`;
+    if (radioFetchedForRef.current === requestKey) return;
+    radioFetchedForRef.current = requestKey;
     fetchRadio(seedVideoId)
       .then((tracks) => {
         // Guard against a stale fetch: the user may have replaced the queue
@@ -586,15 +1114,50 @@ export function useAudioEngine() {
         // append if this seed is still the current, last-in-queue track.
         const s = usePlaybackStore.getState();
         const cur = s.index >= 0 ? s.queue[s.index]?.videoId : undefined;
-        if (cur !== seedVideoId || s.index < s.queue.length - 1) return;
+        if (
+          !s.autoRadio ||
+          s.repeat !== "off" ||
+          s.loadRevision !== radioQueueRevision ||
+          cur !== seedVideoId ||
+          s.index < s.queue.length - 1
+        ) {
+          if (radioFetchedForRef.current === requestKey) {
+            radioFetchedForRef.current = undefined;
+          }
+          if (endedRadioSeedRef.current === seedVideoId) {
+            endedRadioSeedRef.current = null;
+          }
+          return;
+        }
         const rest = tracks.filter((t) => t.id !== seedVideoId);
-        if (rest.length) s.appendToQueue(rest, "autoplay");
+        if (rest.length) {
+          s.appendToQueue(rest, "autoplay");
+          const afterAppend = usePlaybackStore.getState();
+          const stillOnSeed =
+            afterAppend.index >= 0 &&
+            afterAppend.queue[afterAppend.index]?.videoId === seedVideoId;
+          if (
+            endedRadioSeedRef.current === seedVideoId &&
+            stillOnSeed &&
+            !afterAppend.playing
+          ) {
+            endedRadioSeedRef.current = null;
+            afterAppend.next();
+          }
+        } else if (endedRadioSeedRef.current === seedVideoId) {
+          endedRadioSeedRef.current = null;
+        }
       })
       .catch(() => {
         // Allow a retry on transient failure.
-        radioFetchedForRef.current = undefined;
+        if (radioFetchedForRef.current === requestKey) {
+          radioFetchedForRef.current = undefined;
+        }
+        if (endedRadioSeedRef.current === seedVideoId) {
+          endedRadioSeedRef.current = null;
+        }
       });
-  }, [autoRadio, qIndex, qLen, seedVideoId, repeat]);
+  }, [autoRadio, qIndex, qLen, seedVideoId, repeat, radioQueueRevision]);
 
   // Push metadata + playback state to the OS media controls (Windows SMTC).
   // Windows interpolates the scrubber between pushes while the state is
@@ -603,11 +1166,17 @@ export function useAudioEngine() {
   // and reflect seeks. Live values are read imperatively so this OS sync never
   // re-triggers the resolve / playback effects above.
   const duration = usePlaybackStore((s) => s.duration);
+  const status = usePlaybackStore((s) => s.status);
+  const advertisement = usePlaybackStore((s) => s.advertisement);
   useEffect(() => {
     const push = () => {
       const s = usePlaybackStore.getState();
       const t = s.index >= 0 ? s.queue[s.index] : undefined;
-      if (!t) {
+      // The requested song is not the media currently producing sound while
+      // YouTube is showing an advertisement or while its document is still
+      // buffering. Clear OS metadata instead of falsely claiming that song is
+      // playing; it is restored as soon as requested content is ready.
+      if (!t || s.advertisement || s.status !== "ready") {
         void invoke("media_clear").catch(() => {});
         return;
       }
@@ -622,10 +1191,10 @@ export function useAudioEngine() {
       }).catch(() => {});
     };
     push();
-    if (!playing) return;
+    if (!playing || advertisement || status !== "ready") return;
     const id = window.setInterval(push, 2000);
     return () => window.clearInterval(id);
-  }, [track, playing, duration]);
+  }, [track, playing, duration, status, advertisement]);
 
   // Discord Rich Presence mirrors the same metadata, but pushed only on
   // track / play-state / duration change — never the 2s position refresh
@@ -639,7 +1208,7 @@ export function useAudioEngine() {
     if (!discordRp) return; // disabled → useDiscordPresenceSync cleared it
     const s = usePlaybackStore.getState();
     const t = s.index >= 0 ? s.queue[s.index] : undefined;
-    if (!t) {
+    if (!t || s.advertisement || s.status !== "ready") {
       void invoke("discord_clear").catch(() => {});
       return;
     }
@@ -661,7 +1230,7 @@ export function useAudioEngine() {
       startMs,
       endMs,
     }).catch(() => {});
-  }, [track, playing, duration, discordRp]);
+  }, [track, playing, duration, status, advertisement, discordRp]);
 }
 
 function buildArtistLabel(track: QueueTrack): string {

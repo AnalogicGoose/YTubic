@@ -62,11 +62,9 @@ export async function fetchLikedSongs(): Promise<ShelfItem[]> {
  * Union of every track the user's library pins: Liked Songs, every
  * saved/created playlist, and saved albums. Deduped by videoId.
  *
- * This is the "protected set" for cache management — the Storage tab
- * and the auto-clean sweep treat anything outside it as deletable, so
- * it must err toward completeness: any source or nested playlist page
- * failing to load throws instead of returning a partial union that would
- * silently mark valid cached tracks as disposable.
+ * The Storage tab uses this complete set for its Library/Other labels and
+ * manual bulk-delete preview. Any source or nested playlist page failing to
+ * load throws instead of presenting a dangerously partial deletion set.
  */
 export async function fetchLibraryTracks(): Promise<ShelfItem[]> {
   const { fetchPlaylistStrict } = await import("./playlist");
@@ -107,15 +105,12 @@ export async function fetchLibraryTracks(): Promise<ShelfItem[]> {
     ...albumIds.map((id) => () => fetchAlbum(id).then((a) => a.tracks)),
   ];
   let next = 0;
-  const workers = Array.from(
-    { length: Math.min(4, jobs.length) },
-    async () => {
-      while (next < jobs.length) {
-        const job = jobs[next++];
-        add(await job());
-      }
-    },
-  );
+  const workers = Array.from({ length: Math.min(4, jobs.length) }, async () => {
+    while (next < jobs.length) {
+      const job = jobs[next++];
+      add(await job());
+    }
+  });
   await Promise.all(workers);
 
   return [...byId.values()];

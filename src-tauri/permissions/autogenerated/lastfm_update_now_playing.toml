@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-lastfm-update-now-playing"
+description = "Enables the lastfm_update_now_playing command without any pre-configured scope."
+commands.allow = ["lastfm_update_now_playing"]
+
+[[permission]]
+identifier = "deny-lastfm-update-now-playing"
+description = "Denies the lastfm_update_now_playing command without any pre-configured scope."
+commands.deny = ["lastfm_update_now_playing"]

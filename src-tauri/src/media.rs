@@ -2,17 +2,16 @@
 // Transport Controls (SMTC) — the media tile in the Quick Settings / volume
 // flyout, the lock screen, and the hardware media keys.
 //
-// Why we drive this from Rust instead of the webview's `navigator.mediaSession`:
-// the audio plays in an `<audio>` element inside WebView2, so Chromium creates
-// its OWN SMTC session — but that session is owned by the `msedgewebview2.exe`
-// child process, whose app identity Windows can't resolve, so the tile shows
-// "Unknown app" with no icon. There is no supported API to re-attribute a
-// WebView2 media session to the host app (WebView2Feedback #2236, open since
-// 2022). Creating the SMTC ourselves, bound to the host process's main window,
-// makes Windows resolve the tile to Goosic's own executable identity (name +
-// icon). Chromium's competing "Unknown app" tile is suppressed by disabling its
-// media session via `--disable-features=...MediaSessionService` on the main
-// window (see `additionalBrowserArgs` in tauri.conf.json).
+// Why we drive this from Rust instead of a webview's `navigator.mediaSession`:
+// online audio belongs to the isolated YouTube Music playback webview, while
+// explicit downloaded audio belongs to the main webview's `<audio>` element.
+// Either Chromium-owned session would be attributed to `msedgewebview2.exe`,
+// whose app identity Windows cannot resolve, so the tile can show "Unknown app"
+// with no icon. There is no supported API to re-attribute a WebView2 media
+// session to the host app (WebView2Feedback #2236, open since 2022). Creating
+// SMTC ourselves, bound to Goosic's main window, gives both backends one stable
+// host identity. Chromium's competing session is suppressed with the shared
+// `--disable-features=...MediaSessionService` browser argument.
 //
 // souvlaki's `MediaControls` is COM-backed on Windows: it is neither `Send` nor
 // `Sync`, and its calls must run on the thread that owns the window (the main
