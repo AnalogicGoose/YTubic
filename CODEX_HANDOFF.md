@@ -4,9 +4,9 @@
 > engineering, UI, release, and troubleshooting context for this repository.
 >
 > Last verified: **2026-07-22**
-> Current app version: **0.5.2**
-> Current release candidate: **v0.5.2 Linux playback bridge and mesh performance**
-> Latest public release: <https://github.com/AnalogicGoose/Goosic/releases/tag/v0.5.1>
+> Current app version: **0.5.3**
+> Current release candidate: **v0.5.3 macOS playback bridge and queue hardening**
+> Latest public release: <https://github.com/AnalogicGoose/Goosic/releases/tag/v0.5.2>
 
 ## 1. New-session quick start
 
@@ -249,7 +249,9 @@ native observer bridge.
 - `src/lib/ytdlp.ts` â€” passive managed-download setup/progress lifecycle.
 - `src/lib/query-client.ts` â€” query caching/persistence budgets.
 - `src/lib/store/playback.ts` â€” queue, history, repeat, shuffle, autoplay, and
-  playback actions. The floating window uses a remote-control bridge.
+  playback actions. The floating window uses a remote-control bridge. Persisted
+  queue rows are normalized on migration so missing legacy/dev artwork becomes
+  an empty thumbnail array rather than crashing the player shell.
 - `src/lib/store/layout.ts` â€” `right`, `bottom`, and `floating` player layout.
 - `src/lib/store/settings.ts` â€” persisted settings and Rust sync hooks,
   including the selected visual child theme.
@@ -300,8 +302,9 @@ native observer bridge.
   account restrictions, and entitlements remain intact.
 - The remote YouTube document has no Tauri capability. A versioned observer
   reports playback through a secret per-launch bridge: a loopback HTTP route on
-  Windows and macOS, and the secure `goosicbridge` URI scheme on Linux, where
-  WebKitGTK blocks loopback HTTP as mixed content (see section 13). Native code
+  Windows, the secure `goosicbridge` URI scheme on Linux, and an origin-checked
+  `WKScriptMessageHandler` on macOS, where WebKit blocks the network bridge
+  routes (see section 13). Native code
   validates the trusted Origin, secret, payload size, generation, expected
   video ID, strictly increasing per-generation sequence, and numeric values
   before emitting readiness, position, duration, volume, buffering,
@@ -1071,14 +1074,16 @@ it entirely. The Ubuntu release job is the first real compile. Prefer changes
 that reuse calls already present in the file over introducing new `gdk`/`cairo`
 API surface that no local check can validate.
 
-**The observer bridge cannot use loopback HTTP on Linux (found 2026-07-22).**
-WebKitGTK blocks an `http://127.0.0.1` subresource of an HTTPS document as
-mixed content, so the observer's `fetch` to the loopback bridge never left the
-official page. Verified against real `music.youtube.com` in a WebKitWebView:
+**The observer bridge cannot rely on loopback HTTP in WebKit (found
+2026-07-22).** WebKitGTK blocks an `http://127.0.0.1` subresource of an HTTPS
+document as mixed content, so the observer's `fetch` to the loopback bridge
+never left the official page. Verified against real `music.youtube.com` in a
+WebKitWebView:
 `[blocked] The page at https://music.youtube.com/ requested insecure content
 from http://127.0.0.1:PORT/web-player/state`, and the server recorded zero
-requests. Chromium and WKWebView treat loopback as a potentially trustworthy
-origin, which is why only Linux is affected.
+requests. WKWebView historically treated loopback as potentially trustworthy,
+but newer macOS/WebKit builds can withhold the same request behind
+private-network policy. Chromium remains on the loopback route.
 
 The symptom is not a silent failure: the track is *audible* while React never
 receives `ready`, so the 12-second startup timer in `audio-engine.ts` fires,
@@ -1087,15 +1092,14 @@ second timeout surfaces "Official player startup timed out."
 
 Linux therefore carries the identical envelope over the custom URI scheme
 `goosicbridge` (`web_player::BRIDGE_SCHEME`), registered through Tauri's
-`register_asynchronous_uri_scheme_protocol`. wry registers custom schemes with
-WebKit's security manager as *secure*, which is what lifts the mixed-content
-block, and it forwards the request's method, headers, and body (its
-`linux-body` feature is enabled by `tauri-runtime-wry`). `serve_bridge_scheme`
-applies the same gates as the loopback router — trusted Origin, the bridge
-header, the per-launch secret in the path, POST only, the 16 KiB limit — plus
-one the HTTP route cannot express: only the `youtube-player` webview label is
-accepted. Both transports then share `apply_state_event`/`apply_identity_event`,
-so there is exactly one copy of the validation.
+`register_asynchronous_uri_scheme_protocol`. WebKitGTK marks that scheme secure
+to lift its mixed-content block, and its `linux-body` support preserves the
+request body. macOS cannot use that fetch either because the official page's
+CSP rejects the custom scheme before wry sees a request. Its observer uses a
+`WKScriptMessageHandler` installed only on the `youtube-player` WebView. Native
+code verifies WebKit-attested main-frame origin, payload size, per-launch token,
+and route before calling the same `apply_state_event`/`apply_identity_event`
+validators used by the HTTP and Linux transports.
 
 Two details that are load-bearing:
 
@@ -1253,6 +1257,10 @@ persisted and synchronized across native windows.
 
 ## 18. Recent release history
 
+- **`v0.5.3`** â€” moves WKWebView observer envelopes
+  from blocked network fetches to an origin-checked native script-message
+  handler. This fixes audio playing while readiness/timeline events are absent,
+  followed by the 12-second restart and final official-player error.
 - **`v0.5.2`** â€” makes Linux playback actually work. The observer bridge moves
   to a secure custom URI scheme because WebKitGTK blocks its loopback HTTP as
   mixed content (section 13), which had left every track audible but stuck on a

@@ -41,10 +41,10 @@ export function getHighResVariant(url: string, size = 1080): string | null {
 }
 
 export function pickThumbnail(
-  thumbnails: YtThumbnail[],
+  thumbnails: readonly YtThumbnail[] | null | undefined,
   targetSize = 256,
 ): string | null {
-  if (!thumbnails.length) return null;
+  if (!thumbnails?.length) return null;
   // Prefer the smallest thumbnail that is still ≥ targetSize; fall back to largest.
   const sorted = [...thumbnails].sort(
     (a, b) => (a.width ?? 0) - (b.width ?? 0),
@@ -58,9 +58,9 @@ export function pickThumbnail(
  * safe fallback when a `high-res` upgrade attempt fails to load.
  */
 export function pickHighResThumbnail(
-  thumbnails: YtThumbnail[],
+  thumbnails: readonly YtThumbnail[] | null | undefined,
 ): string | null {
-  if (!thumbnails.length) return null;
+  if (!thumbnails?.length) return null;
   const sorted = [...thumbnails].sort(
     (a, b) => (a.width ?? 0) - (b.width ?? 0),
   );
@@ -68,7 +68,8 @@ export function pickHighResThumbnail(
 }
 
 type Props = {
-  thumbnails: YtThumbnail[];
+  /** Persisted queues from older/dev builds may not contain artwork. */
+  thumbnails?: YtThumbnail[] | null;
   alt: string;
   round?: boolean;
   className?: string;

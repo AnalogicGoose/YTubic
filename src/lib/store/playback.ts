@@ -109,8 +109,17 @@ export type PlaybackState = {
   cycleRepeat: () => void;
 };
 
+function normalizeQueueTrack(track: QueueTrack): QueueTrack {
+  return {
+    ...track,
+    thumbnails: Array.isArray(track.thumbnails) ? track.thumbnails : [],
+  };
+}
+
 function shelfItemToTrack(item: ShelfItem | QueueTrack): QueueTrack | null {
-  if ("videoId" in item) return item;
+  if ("videoId" in item) {
+    return normalizeQueueTrack(item);
+  }
   if (item.kind !== "song" && item.kind !== "video") return null;
   return {
     videoId: item.id,
@@ -119,7 +128,7 @@ function shelfItemToTrack(item: ShelfItem | QueueTrack): QueueTrack | null {
     artists: item.artists,
     album: item.album,
     albumId: item.albumId,
-    thumbnails: item.thumbnails,
+    thumbnails: Array.isArray(item.thumbnails) ? item.thumbnails : [],
     duration: item.duration,
   };
 }
@@ -219,7 +228,10 @@ const playbackStateCreator: StateCreator<PlaybackState> = (set, get) => ({
     const i = Math.max(0, Math.min(startIndex, tracks.length - 1));
     // Honour an active shuffle: keep the chosen track current and shuffle
     // the upcoming portion, matching setShuffle's semantics.
-    let queue = tracks.map((t) => ({ ...t, source: t.source ?? "user" }));
+    let queue = tracks.map((track) => ({
+      ...normalizeQueueTrack(track),
+      source: track.source ?? "user",
+    }));
     if (get().shuffle) {
       queue = [...queue.slice(0, i + 1), ...fisherYates(queue.slice(i + 1))];
     }
@@ -563,7 +575,18 @@ export const usePlaybackStore = isFloatingPlayerWindow()
   : create<PlaybackState>()(
       persist(playbackStateCreator, {
         name: "ytm-playback",
-        version: 1,
+        version: 2,
+        migrate: (persisted) => {
+          const state = persisted as Partial<PlaybackState>;
+          const queue = Array.isArray(state.queue)
+            ? state.queue.map(normalizeQueueTrack)
+            : [];
+          const index =
+            queue.length === 0
+              ? -1
+              : Math.max(0, Math.min(state.index ?? 0, queue.length - 1));
+          return { ...state, queue, index } as PlaybackState;
+        },
         // Only the user-facing settings + the queue itself are saved.
         // Volatile fields (position, status, streamUrl, error,
         // pendingSeek) and `playing` are reset on rehydrate so a fresh

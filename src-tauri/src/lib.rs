@@ -4170,11 +4170,15 @@ pub fn run() {
         .manage(discord::spawn())
         .manage(lastfm::LastfmState::default());
 
-    // The official page cannot reach the loopback bridge on Linux: WebKitGTK
-    // blocks an `http://127.0.0.1` subresource of an HTTPS document as mixed
-    // content, so playback used to run audibly while every sample was dropped
-    // inside the page. Serve the same envelope over a scheme WebKit treats as
-    // secure. Windows and macOS keep the loopback route untouched.
+    // WebKitGTK blocks an `http://127.0.0.1` subresource of the official
+    // HTTPS page as mixed content, so on Linux the observer carries the same
+    // envelope over the app-owned `goosicbridge` scheme instead (WebKitGTK
+    // marks the registered scheme secure). macOS/WKWebView blocks BOTH the
+    // loopback route (private-network policy) AND the custom scheme (CSP
+    // `connect-src` refuses the fetch before wry's handler ever sees it —
+    // confirmed 2026-07-22: playback runs, zero scheme requests arrive), so
+    // macOS reports through a WKScriptMessageHandler instead (see
+    // web_player::install_message_bridge). Windows keeps loopback HTTP.
     #[cfg(target_os = "linux")]
     let builder = builder.register_asynchronous_uri_scheme_protocol(
         web_player::BRIDGE_SCHEME,

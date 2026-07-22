@@ -1,6 +1,6 @@
 [package]
 name = "goosic"
-version = "0.5.2"
+version = "0.5.3"
 description = "Goosic — fast, responsive YouTube Music desktop client"
 authors = ["George Shyshov"]
 license = "GPL-3.0-only"
@@ -131,6 +131,19 @@ objc2-app-kit = { version = "0.3", features = [
     "NSWindow",
 ] }
 objc2-foundation = { version = "0.3", features = ["NSGeometry"] }
+# WKScriptMessageHandler transport for the web-player observer bridge:
+# WKWebView refuses fetch() from the official https page to both loopback
+# HTTP (private-network policy) and custom schemes, so page JS reports
+# playback through a script message handler instead (see web_player.rs).
+objc2-web-kit = { version = "0.3", features = [
+    "WKFrameInfo",
+    "WKScriptMessage",
+    "WKScriptMessageHandler",
+    "WKSecurityOrigin",
+    "WKUserContentController",
+    "WKWebView",
+    "WKWebViewConfiguration",
+] }
 
 [dev-dependencies]
 # ServiceExt::oneshot for the stream-server routing test.

@@ -137,6 +137,16 @@ describe("queue source labels", () => {
       "autoplay",
     ]);
   });
+
+  it("normalizes missing artwork on malformed legacy queue rows", () => {
+    const legacy = { videoId: "legacy", title: "Legacy" } as QueueTrack;
+
+    usePlaybackStore.getState().playNow(legacy);
+    expect(usePlaybackStore.getState().queue[0]?.thumbnails).toEqual([]);
+
+    usePlaybackStore.getState().setQueue([legacy]);
+    expect(usePlaybackStore.getState().queue[0]?.thumbnails).toEqual([]);
+  });
 });
 
 describe("shelf item metadata", () => {
