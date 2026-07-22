@@ -121,9 +121,9 @@ function FloatingTitleBar() {
 
   return (
     // `bg-surface` matches the player card below — both layers tint
-    // the blurred cover art with the same translucent black so the
+    // the album-derived mesh with the same translucent black so the
     // strip and the body read as a single uniform card. Without it,
-    // the title bar shows the cover bleed at full saturation while
+    // the title bar shows the mesh at full saturation while
     // the body dims it via `bg-surface`, leaving a visible seam.
     <header
       data-tauri-drag-region

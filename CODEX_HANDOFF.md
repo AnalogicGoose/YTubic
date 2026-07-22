@@ -210,8 +210,8 @@ native observer bridge.
 - `src/components/layout/player-more-menu.tsx` â€” player action menu.
 - `src/components/layout/queue-panel.tsx` â€” queue/history surface.
 - `src/components/layout/lyrics-view.tsx` â€” synced lyrics and lyric scrolling.
-- `src/components/layout/now-playing-background.tsx` â€” dynamic album mesh and
-  legacy blurred-cover fallback.
+- `src/components/layout/now-playing-background.tsx` â€” the album-derived
+  procedural color mesh, the only ambient background.
 - `src/components/layout/update-banner.tsx` â€” updater progress/action surface.
 
 ### Shared content components
@@ -557,30 +557,54 @@ than copied source code.
   the percentage mask/blur stack there cuts wrapped lines and can paint a hard
   rectangular band in WKWebView.
 
-## 8. Dynamic album mesh experiment
+## 8. Dynamic album mesh
 
-The new ambient background is enabled by default and can be disabled in:
+The album mesh is the ambient background. It is no longer an experiment and has
+no toggle of its own: the only related preference is
 
 ```text
-Settings â†’ Experiments â†’ Dynamic album mesh
+Settings â†’ Appearance â†’ Background   (Ambient | Plain)
 ```
 
-The preference is `dynamicAlbumMesh` in `src/lib/store/settings.ts`. When off,
-the app returns to the legacy blurred-cover background.
+`background` in `src/lib/store/settings.ts` decides whether an ambient
+background renders at all; when it is `ambient`, the mesh is what renders.
+
+The older blurred-cover treatment is **gone** — not demoted to a fallback,
+deleted. The cover is a color source only and is never displayed as artwork by
+the background, so nothing in `now-playing-background.tsx` scales or blurs the
+image. Do not reintroduce it, as either a mode or a fallback.
+
+The retired `dynamicAlbumMesh` preference is stripped from persisted settings by
+`stripRetiredSettings`, which both `migrate` and `merge` call. `merge` matters
+because it runs on every hydration, including the cross-window `storage`
+rehydrate, where `migrate` does not; dropping a key in only one of them lets a
+stale value survive. The Experiments tab was removed along with its last
+toggle.
 
 Implementation contract:
 
-1. Load the current high-resolution cover.
+1. Load the current high-resolution cover so the canvas may read it back.
+   `loadSampleableImage` tries a normal `crossOrigin="anonymous"` decode, then
+   falls back to fetching the bytes through `tauri-plugin-http` and decoding a
+   same-origin blob URL. The fallback exists because a host that omits CORS
+   headers fails the first decode outright, and since the mesh is now the only
+   ambient treatment, that used to mean no background at all. Keep both paths.
 2. Sample it into a 48Ã—48 canvas.
 3. Quantize pixels, rank colors by actual frequency, and select up to five
    sufficiently distinct colors.
 4. Keep sampled RGB values as they are. **Do not invent, hue-shift, or boost
    synthetic colors.** A white/red/black cover must not become pink/purple.
 5. Weight a deterministic 6Ã—6 grid by the colors' observed frequency.
-6. Animate grid drift and cell breathing using transforms/opacity.
-7. Crossfade track changes and honor `prefers-reduced-motion`.
-8. If CORS/canvas sampling fails, use the legacy blurred artwork instead of a
-   fake palette.
+6. Paint each cell as a **soft radial blob** with a transparent falloff, not a
+   filled square, and give it a seeded off-center position and radius.
+   Overlapping blobs fuse into one fluid field; filled squares read as a
+   mosaic and rely entirely on the blur radius to hide their seams. The seeded
+   offsets are what keep the field from resolving into a visible lattice.
+7. Animate grid drift and cell breathing using transforms/opacity.
+8. Crossfade track changes and honor `prefers-reduced-motion`.
+9. If sampling still fails, render no ambient background for that track. A fake
+   palette is forbidden and there is no blurred-artwork fallback, so the window
+   keeps its plain background.
 
 ### Critical packaged-build fix
 
@@ -759,6 +783,33 @@ Update behavior:
 - Dev mode uses a mock update so the banner flow can be tested.
 - Release mode downloads, verifies, installs, and relaunches through Tauri.
 - Windows installation mode is passive.
+
+### Release notes drive the in-app What's New
+
+`src/lib/whats-new-remote.ts` reads
+`https://api.github.com/repos/AnalogicGoose/Goosic/releases` through
+`tauri-plugin-http` and renders whatever a release's body says as that
+version's What's New. Write the notes once, on the GitHub release; they need no
+matching entry in the app.
+
+- The host is allow-listed in `src-tauri/capabilities/default.json`, not in the
+  CSP. plugin-http performs the request in Rust, so the webview `connect-src`
+  list stays as narrow as it is.
+- Release bodies are remote text. They are parsed to plain strings and rendered
+  as React text nodes; markdown becomes headings and bullets and everything
+  else, including any HTML, is stripped. Never render a release body as HTML.
+- `.github/workflows/release.yml` writes a fixed `releaseBody` ("See the assets
+  below to download and install this version."). A body that reduces to only
+  that boilerplate counts as having no notes, and the bundled entry in
+  `src/lib/whats-new.ts` is shown instead. **Every release published through
+  v0.4.7 is in that state**, so the bundled entries are still what users see
+  until someone writes real notes on a release. Editing a release's body on
+  GitHub is enough; the app picks it up within its six-hour revalidation.
+- `src/lib/whats-new.ts` remains the fallback for those versions and for
+  offline launches. The query is persisted, so the notes for the version a user
+  just updated to survive a cold start without network.
+- The unauthenticated GitHub API allows 60 requests an hour per IP. Keep the
+  six-hour `staleTime`; do not add a poll.
 
 Required GitHub Actions secrets:
 
@@ -969,7 +1020,7 @@ Minimum visual matrix:
 - Song, album, playlist, video, and artist shelf cards.
 - Artist-name clicks inside playable cards/rows.
 - Home, Search, Library, Album, Artist, and Playlist routes.
-- Dynamic album mesh on and off.
+- Background set to Ambient and to Plain.
 - A mostly white cover and a dark/saturated cover.
 - Window resize at the 900Ã—600 minimum and a large desktop viewport.
 
@@ -1019,8 +1070,7 @@ Important examples:
 - close button hides to tray;
 - offline media changes only through explicit playlist downloads or Storage
   removal actions;
-- ambient background;
-- dynamic album mesh on;
+- ambient background (the album mesh; there is no separate mesh toggle);
 - playback notifications off;
 - Discord Rich Presence off;
 - Last.fm off until connected.

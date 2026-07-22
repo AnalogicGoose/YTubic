@@ -12,8 +12,8 @@ import type { Thumbnail as YtThumbnail } from "@/lib/innertube/types";
  * Living outside `<main>` is what guarantees the bar naturally hides
  * the track list scrolling underneath: `<main>` clips its own
  * overflow, so its rows can never reach above the column's `<main>`
- * top edge. The bar inherits the app-wide blurred-cover tint from
- * `<BackgroundCover>` without needing any background of its own.
+ * top edge. The bar inherits the app-wide ambient tint from
+ * `<NowPlayingBackground>` without needing any background of its own.
  */
 export type EntityHeaderConfig = {
   title: string;

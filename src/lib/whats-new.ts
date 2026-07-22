@@ -38,6 +38,42 @@ export type WhatsNewEntry = {
  */
 export const WHATS_NEW: WhatsNewEntry[] = [
   {
+    version: "0.5.0",
+    date: "July 2026",
+    sections: [
+      {
+        heading: "A new audio engine",
+        items: [
+          "Playback now runs on YouTube Music's official player, so guests and free accounts can listen wherever YouTube permits it, with normal advertisements and account restrictions intact.",
+          "Autoplay reliably moves to the next track instead of stalling or replaying the song that just finished.",
+          "Fixed the brief burst of full-volume audio that could slip through when a track changed.",
+          "Seeking now lands exactly where you drop it, and the progress bar stays in step with the audio.",
+          "A failed player gets one clean restart instead of quietly switching to a downloader.",
+        ],
+      },
+      {
+        heading: "Liquid Glass",
+        items: [
+          "Menus, popovers, dialogs, the sidebar, and every player layout now share one Liquid Glass material with real refraction on Windows and native material on macOS.",
+          "The ambient background is a fluid mesh of colors sampled from the current album art, with softer, more organic motion.",
+          "Choose Ambient or Plain under Appearance; the old blurred-cover background and its Experiments toggle are gone.",
+        ],
+      },
+      {
+        heading: "Offline playlists",
+        items: [
+          "Premium users can explicitly download a complete playlist with progress, cancellation, and retry.",
+          "Play downloaded uses only validated local files and never starts a hidden network download.",
+          "Existing downloads survive the update and are never silently deleted.",
+        ],
+      },
+      {
+        heading: "Release notes",
+        body: "What's New now shows whatever the GitHub release says, so these notes stay in step with every future update.",
+      },
+    ],
+  },
+  {
     version: "0.4.7",
     date: "July 2026",
     sections: [

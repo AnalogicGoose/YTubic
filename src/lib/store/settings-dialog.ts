@@ -1,7 +1,8 @@
 import { create } from "zustand";
 
-export type SettingsTab =
-  "general" | "appearance" | "experiments" | "storage" | "integrations";
+// "experiments" was retired with its last remaining toggle; the album mesh is
+// now unconditional and the Background setting is the only related preference.
+export type SettingsTab = "general" | "appearance" | "storage" | "integrations";
 
 type State = {
   open: boolean;

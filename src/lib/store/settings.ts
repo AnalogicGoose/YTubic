@@ -16,8 +16,9 @@ export type BackgroundMode = "ambient" | "plain";
 type State = {
   /** What the title-bar ✕ does: hide to tray (default) or quit. */
   closeAction: CloseButtonAction;
-  /** Window backdrop: "ambient" tints with blurred album art,
-   *  "plain" keeps the flat theme background. */
+  /** Window backdrop: "ambient" animates the album-derived color mesh,
+   *  "plain" keeps the flat theme background. This is the only background
+   *  preference; the mesh is no longer one of two ambient treatments. */
   background: BackgroundMode;
   /** The semantic visual child theme. Components consume the same token
    *  contract; this value only selects which token set is mounted. */
@@ -25,9 +26,6 @@ type State = {
   /** Backdrop blur radius (px) of the shared glass material, via
    *  `--glass-blur` — the "Glass blur" slider. See `useGlassBlur`. */
   glassBlur: number;
-  /** Experimental animated mesh derived from the current cover. When false,
-   *  Ambient mode uses the original blurred-cover implementation. */
-  dynamicAlbumMesh: boolean;
   /** System toast on track change while the app is in the background
    *  (see `lib/playback-notifications.ts`). */
   playbackNotifications: boolean;
@@ -57,7 +55,6 @@ type State = {
   setBackground: (v: BackgroundMode) => void;
   setVisualTheme: (v: VisualThemeId) => void;
   setGlassBlur: (v: number) => void;
-  setDynamicAlbumMesh: (v: boolean) => void;
   setPlaybackNotifications: (v: boolean) => void;
   setDiscordRichPresence: (v: boolean) => void;
   setLastfmEnabled: (v: boolean) => void;
@@ -68,6 +65,32 @@ type State = {
   /** Forget the connected account and stop scrobbling. */
   clearLastfmSession: () => void;
 };
+
+/**
+ * Persisted keys that no longer back a preference. Stripped on every hydration
+ * path so an old install stops carrying values nothing reads.
+ */
+const RETIRED_SETTINGS = [
+  "glassOpacity",
+  "cacheAutoClean",
+  "lastCacheCleanAt",
+  "dynamicAlbumMesh",
+] as const;
+
+/**
+ * Drop retired keys from a persisted settings object, returning a copy.
+ *
+ * Both hydration paths use this: `migrate`, which runs only on a version bump,
+ * and `merge`, which runs on every hydration including the cross-window
+ * `storage` rehydrate. Missing either one lets a stale value survive.
+ */
+export function stripRetiredSettings(
+  persisted: Record<string, unknown>,
+): Record<string, unknown> {
+  const stripped = { ...persisted };
+  for (const key of RETIRED_SETTINGS) delete stripped[key];
+  return stripped;
+}
 
 /**
  * General app preferences editable from the Settings page. Persisted
@@ -82,7 +105,6 @@ export const useSettingsStore = create<State>()(
       background: "ambient",
       visualTheme: "default",
       glassBlur: GLASS_BLUR_DEFAULT,
-      dynamicAlbumMesh: true,
       playbackNotifications: false,
       discordRichPresence: false,
       lastfmEnabled: false,
@@ -94,7 +116,6 @@ export const useSettingsStore = create<State>()(
       setBackground: (background) => set({ background }),
       setVisualTheme: (visualTheme) => set({ visualTheme }),
       setGlassBlur: (v) => set({ glassBlur: clampGlassBlur(v) }),
-      setDynamicAlbumMesh: (dynamicAlbumMesh) => set({ dynamicAlbumMesh }),
       setPlaybackNotifications: (playbackNotifications) =>
         set({ playbackNotifications }),
       setDiscordRichPresence: (discordRichPresence) =>
@@ -115,33 +136,31 @@ export const useSettingsStore = create<State>()(
     }),
     {
       name: "ytm-settings",
-      version: 2,
-      // Frost opacity used to be persisted as `glassOpacity`. Remove that
-      // retired preference during hydration so existing installs do not keep
-      // carrying an invisible legacy value.
+      version: 3,
+      // Preferences that have been retired. They are stripped during hydration
+      // so existing installs stop carrying values nothing reads any more.
+      // `dynamicAlbumMesh` chose between the album mesh and the older blurred
+      // cover; the mesh is now the only ambient treatment, and the blurred
+      // cover survives only as the automatic sampling-failure fallback. An
+      // install that had turned the mesh off gets it back, which is intended:
+      // the toggle it used no longer exists.
       migrate: (persisted) => {
         if (!persisted || typeof persisted !== "object") {
           return persisted as State;
         }
 
-        const migrated = { ...(persisted as Record<string, unknown>) };
-        delete migrated.glassOpacity;
-        delete migrated.cacheAutoClean;
-        delete migrated.lastCacheCleanAt;
-        return migrated as unknown as State;
+        return stripRetiredSettings(
+          persisted as Record<string, unknown>,
+        ) as unknown as State;
       },
       // Old installs may have no visualTheme yet — or a since-retired id
       // (goosic/ocean/sunset/mono). `isVisualThemeId` now only accepts
       // default/modern, so any legacy or corrupted value falls back to the
       // current default rather than blocking hydration.
       merge: (persisted, current) => {
-        const persistedSettings = {
-          ...((persisted ?? {}) as Record<string, unknown>),
-        };
-        delete persistedSettings.glassOpacity;
-        delete persistedSettings.cacheAutoClean;
-        delete persistedSettings.lastCacheCleanAt;
-        const saved = persistedSettings as Partial<State>;
+        const saved = stripRetiredSettings(
+          (persisted ?? {}) as Record<string, unknown>,
+        ) as Partial<State>;
         const value = saved?.visualTheme;
         const savedBlur = saved?.glassBlur;
         return {

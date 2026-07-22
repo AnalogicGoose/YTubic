@@ -56,7 +56,11 @@ export function shouldPersistQuery(queryKey: readonly unknown[]): boolean {
     // `staleTime: ONE_HOUR` in `useLyricsSources` still triggers a
     // background revalidate so newly-added LRCLIB entries surface
     // within an hour of the next play.
-    head === "lyrics"
+    head === "lyrics" ||
+    // GitHub release notes back the What's New dialog. Persisting them means
+    // an offline launch still shows the real notes for the version the user
+    // just updated to, instead of dropping back to the bundled copy.
+    head === "release-notes"
   );
 }
 

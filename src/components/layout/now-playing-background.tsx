@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import { pickHighResThumbnail } from "@/components/shared/thumbnail";
 import { currentTrack, usePlaybackStore } from "@/lib/store/playback";
-import { useSettingsStore } from "@/lib/store/settings";
 
 type MeshSample = { color: string; weight: number };
 type MeshPalette = readonly [
@@ -15,17 +15,55 @@ type MeshPalette = readonly [
 
 const paletteCache = new Map<string, Promise<MeshPalette | null>>();
 
-async function extractPalette(url: string): Promise<MeshPalette> {
-  const image = new Image();
-  image.crossOrigin = "anonymous";
-  image.decoding = "async";
-
-  await new Promise<void>((resolve, reject) => {
-    image.onload = () => resolve();
+/** Decode `src` into an image the canvas is allowed to read back. */
+function decodeImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    // Required for `getImageData`: without it a cross-origin cover taints the
+    // canvas. A host that omits CORS headers fails this load outright, which
+    // is what `loadSampleableImage` below recovers from.
+    image.crossOrigin = "anonymous";
+    image.decoding = "async";
+    image.onload = () => resolve(image);
     image.onerror = () =>
       reject(new Error("Album artwork could not be loaded"));
-    image.src = url;
+    image.src = src;
   });
+}
+
+/**
+ * Load a cover the canvas can sample, whatever the host's CORS policy.
+ *
+ * The direct path covers the normal case, including local cached covers whose
+ * loopback route already sends permissive CORS. When it fails, the bytes are
+ * fetched through `tauri-plugin-http` — that request happens in Rust, so no
+ * browser CORS rule applies — and decoded from a same-origin blob URL, which
+ * can never taint the canvas.
+ *
+ * Without this second path an uncooperative host produced no palette at all,
+ * and since the mesh is the only ambient treatment that meant no background.
+ */
+async function loadSampleableImage(url: string): Promise<HTMLImageElement> {
+  try {
+    return await decodeImage(url);
+  } catch {
+    const response = await tauriFetch(url, { method: "GET" });
+    if (!response.ok) {
+      throw new Error(`Album artwork responded ${response.status}`);
+    }
+    const objectUrl = URL.createObjectURL(await response.blob());
+    try {
+      return await decodeImage(objectUrl);
+    } finally {
+      // The decoded bitmap outlives the URL handle, so it is safe to release
+      // it as soon as decoding settles rather than leaking one per track.
+      URL.revokeObjectURL(objectUrl);
+    }
+  }
+}
+
+async function extractPalette(url: string): Promise<MeshPalette> {
+  const image = await loadSampleableImage(url);
 
   const canvas = document.createElement("canvas");
   canvas.width = 48;
@@ -110,7 +148,8 @@ function getPalette(url: string): Promise<MeshPalette | null> {
   if (cached) return cached;
 
   // Never invent colors. A CORS/canvas failure returns null and the component
-  // below restores the original blurred-art background for that track.
+  // below renders no ambient background for that track, because the only
+  // ambient treatment is the sampled mesh.
   const pending = extractPalette(url).catch(() => null);
   paletteCache.set(url, pending);
   if (paletteCache.size > 64) {
@@ -132,7 +171,17 @@ function hashPalette(palette: MeshPalette): number {
   return hash >>> 0;
 }
 
-function createMeshGrid(palette: MeshPalette): MeshSample[] {
+/** One blob: which sampled color it paints, and its seeded placement. */
+type MeshCell = {
+  color: string;
+  /** Blob center within its grid slot, as CSS percentages. */
+  x: number;
+  y: number;
+  /** Blob size relative to its slot, so radii vary across the field. */
+  scale: number;
+};
+
+function createMeshGrid(palette: MeshPalette): MeshCell[] {
   // A seeded generator keeps the mosaic stable between React renders while
   // still giving every cover its own arrangement.
   let seed = hashPalette(palette) || 1;
@@ -146,14 +195,23 @@ function createMeshGrid(palette: MeshPalette): MeshSample[] {
     0,
   );
 
-  return Array.from({ length: 36 }, () => {
+  const pick = () => {
     let target = random() * totalWeight;
     for (const sample of palette) {
       target -= sample.weight;
       if (target <= 0) return sample;
     }
     return palette[0];
-  });
+  };
+
+  return Array.from({ length: 36 }, () => ({
+    color: pick().color,
+    // Offsetting each blob off its slot center is what stops the field from
+    // resolving into a visible 6x6 lattice once the blur is applied.
+    x: 20 + random() * 60,
+    y: 20 + random() * 60,
+    scale: 1.05 + random() * 0.45,
+  }));
 }
 
 function MeshLayer({ palette }: { palette: MeshPalette }) {
@@ -165,13 +223,16 @@ function MeshLayer({ palette }: { palette: MeshPalette }) {
       style={{ backgroundColor: palette[0].color }}
     >
       <div className="album-mesh-grid">
-        {cells.map((sample, index) => (
+        {cells.map((cell, index) => (
           <span
-            key={`${index}-${sample.color}`}
+            key={`${index}-${cell.color}`}
             className="album-mesh-cell"
             style={
               {
-                "--mesh-color": sample.color,
+                "--mesh-color": cell.color,
+                "--mesh-x": `${cell.x.toFixed(1)}%`,
+                "--mesh-y": `${cell.y.toFixed(1)}%`,
+                "--mesh-scale": cell.scale.toFixed(3),
                 "--mesh-delay": `${-((index * 1.37) % 19).toFixed(2)}s`,
                 "--mesh-duration": `${18 + (index % 7) * 2}s`,
               } as CSSProperties
@@ -201,9 +262,10 @@ function AlbumMesh({ url }: { url: string }) {
     };
   }, [url]);
 
-  if (result?.url === url && result.palette === null) {
-    return <LegacyBlurredCover url={url} />;
-  }
+  // Sampling failed (CORS-tainted or unreadable canvas). There is no blurred
+  // artwork to fall back to any more and inventing a palette is forbidden, so
+  // this track simply gets the plain window background.
+  if (result?.url === url && result.palette === null) return null;
 
   const mesh = result?.palette
     ? { url: result.url, palette: result.palette }
@@ -234,67 +296,23 @@ function AlbumMesh({ url }: { url: string }) {
   );
 }
 
-/** The previous ambient treatment, kept intact as the experiment fallback. */
-function LegacyBlurredCover({ url }: { url: string }) {
-  const [slotA, setSlotA] = useState<string | null>(null);
-  const [slotB, setSlotB] = useState<string | null>(null);
-  const [active, setActive] = useState<"A" | "B">("A");
-
-  useEffect(() => {
-    const currentSlot = active === "A" ? slotA : slotB;
-    if (url === currentSlot) return;
-    if (active === "A") {
-      setSlotB(url);
-      setActive("B");
-    } else {
-      setSlotA(url);
-      setActive("A");
-    }
-  }, [url, active, slotA, slotB]);
-
-  const baseClass =
-    "pointer-events-none absolute inset-0 h-full w-full scale-125 object-cover blur-3xl saturate-150 transition-opacity duration-700 ease-out";
-
-  return (
-    <div
-      className="pointer-events-none absolute inset-0 overflow-hidden"
-      aria-hidden
-    >
-      {slotA && (
-        <img
-          src={slotA}
-          alt=""
-          className={baseClass}
-          style={{ opacity: active === "A" ? 0.3 : 0 }}
-        />
-      )}
-      {slotB && (
-        <img
-          src={slotB}
-          alt=""
-          className={baseClass}
-          style={{ opacity: active === "B" ? 0.3 : 0 }}
-        />
-      )}
-      <div className="bg-cover-noise absolute inset-0" />
-    </div>
-  );
-}
-
-/** Shared by the main and floating windows so both use exactly the same
- * palette, transition, and legacy fallback behavior. */
+/**
+ * The ambient background: a procedural color mesh sampled from the current
+ * cover. Shared by the main and floating windows so both use exactly the same
+ * palette and transition.
+ *
+ * There is no blurred-artwork variant. The cover is a color source only, never
+ * something the background displays, so nothing here scales or blurs the image
+ * itself. Whether an ambient background renders at all is the Background
+ * setting, checked by the caller.
+ */
 export function NowPlayingBackground() {
   const track = usePlaybackStore(currentTrack);
-  const dynamicAlbumMesh = useSettingsStore((s) => s.dynamicAlbumMesh);
   const url =
     track?.thumbnails && track.thumbnails.length > 0
       ? pickHighResThumbnail(track.thumbnails)
       : null;
 
   if (!url) return null;
-  return dynamicAlbumMesh ? (
-    <AlbumMesh url={url} />
-  ) : (
-    <LegacyBlurredCover url={url} />
-  );
+  return <AlbumMesh url={url} />;
 }

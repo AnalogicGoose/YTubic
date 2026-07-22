@@ -641,11 +641,22 @@ html body [data-slot="sidebar-container"] {
     backface-visibility: hidden;
   }
 
+  /* Each cell is a soft radial blob rather than a filled square. Overlapping
+     blobs with transparent falloff fuse into one fluid field, which is what
+     gives the Apple Music look its organic edges; filled squares read as a
+     mosaic and depend entirely on the blur radius to hide their seams. The
+     blob is centered by a per-cell seeded offset so the field never looks
+     like a lattice. */
   .album-mesh-cell {
     min-width: 0;
     min-height: 0;
-    background: var(--mesh-color);
-    transform: translate3d(-3%, -2%, 0) scale(1.18);
+    background: radial-gradient(
+      circle at var(--mesh-x, 50%) var(--mesh-y, 50%),
+      var(--mesh-color) 0%,
+      var(--mesh-color) 38%,
+      transparent 74%
+    );
+    transform: translate3d(-3%, -2%, 0) scale(var(--mesh-scale, 1.18));
     animation: album-mesh-cell-breathe var(--mesh-duration) ease-in-out
       var(--mesh-delay) infinite alternate;
     will-change: transform, opacity;
@@ -654,10 +665,6 @@ html body [data-slot="sidebar-container"] {
 
   .album-mesh-cell:nth-child(3n + 2) {
     animation-direction: alternate-reverse;
-  }
-
-  .album-mesh-cell:nth-child(4n) {
-    transform: translate3d(3%, -3%, 0) scale(1.2);
   }
 
   .album-mesh-frost {
@@ -687,12 +694,14 @@ html body [data-slot="sidebar-container"] {
 
   @keyframes album-mesh-cell-breathe {
     0% {
-      opacity: 0.88;
-      transform: translate3d(-4%, -3%, 0) scale(1.16);
+      opacity: 0.82;
+      transform: translate3d(-5%, -4%, 0)
+        scale(calc(var(--mesh-scale, 1.18) * 0.94));
     }
     100% {
       opacity: 1;
-      transform: translate3d(4%, 3%, 0) scale(1.24);
+      transform: translate3d(5%, 4%, 0)
+        scale(calc(var(--mesh-scale, 1.18) * 1.08));
     }
   }
 

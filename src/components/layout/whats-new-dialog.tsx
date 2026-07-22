@@ -5,8 +5,8 @@ import {
   DialogDescription,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { useWhatsNewStore } from "@/lib/store/whats-new";
-import { whatsNewFor } from "@/lib/whats-new";
+import { useReleaseNotes, useWhatsNewStore } from "@/lib/store/whats-new";
+import { resolveWhatsNewEntry } from "@/lib/whats-new-remote";
 import { APP_ICON } from "@/lib/branding";
 
 /**
@@ -20,7 +20,10 @@ export function WhatsNewDialog() {
   const open = useWhatsNewStore((s) => s.open);
   const setOpen = useWhatsNewStore((s) => s.setOpen);
   const version = useWhatsNewStore((s) => s.version);
-  const entry = version ? whatsNewFor(version) : undefined;
+  // What GitHub says about this version wins; the bundled entry covers a
+  // release whose body carries no authored notes, and an offline launch.
+  const releases = useReleaseNotes();
+  const entry = resolveWhatsNewEntry(version, releases);
 
   return (
     <Dialog open={open && !!entry} onOpenChange={setOpen}>
@@ -54,9 +57,11 @@ export function WhatsNewDialog() {
               <DialogTitle className="text-xl font-bold leading-none">
                 What's New
               </DialogTitle>
-              <span className="shrink-0 text-xs text-muted-foreground">
-                {entry.date}
-              </span>
+              {entry.date ? (
+                <span className="shrink-0 text-xs text-muted-foreground">
+                  {entry.date}
+                </span>
+              ) : null}
             </div>
             <DialogDescription className="sr-only">
               Release notes for Goosic version {entry.version}
@@ -73,7 +78,10 @@ export function WhatsNewDialog() {
                 ) : null}
                 {section.body ? (
                   <div className="rounded-lg border border-border/60 bg-muted/40 p-3">
-                    <p className="text-sm leading-relaxed text-muted-foreground">
+                    {/* Release bodies keep their paragraph breaks, and their
+                        links arrive as bare URLs that have to wrap inside a
+                        narrow dialog rather than widen it. */}
+                    <p className="whitespace-pre-line break-words text-sm leading-relaxed text-muted-foreground">
                       {section.body}
                     </p>
                   </div>
@@ -85,7 +93,7 @@ export function WhatsNewDialog() {
                         className="flex gap-2.5 text-sm leading-snug text-foreground/90"
                       >
                         <span className="mt-1.5 size-1.5 shrink-0 rounded-full bg-primary" />
-                        <span>{item}</span>
+                        <span className="min-w-0 break-words">{item}</span>
                       </li>
                     ))}
                   </ul>
